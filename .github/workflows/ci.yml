@@ -12,6 +12,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ADR-022: the vendored OpenSSL build (SQLCipher) runs OpenSSL's
+      # Configure under `perl` from PATH. The runner's default perl is
+      # Git's MSYS2 perl, which lacks core modules (Locale::Maketext::Simple)
+      # and fails Configure. Strawberry Perl (preinstalled on the runner)
+      # must come first.
+      - name: Put Strawberry Perl first on PATH
+        run: |
+          if (-not (Test-Path "C:\Strawberry\perl\bin\perl.exe")) { throw "Strawberry Perl not found at C:\Strawberry\perl\bin" }
+          Add-Content $env:GITHUB_PATH "C:\Strawberry\perl\bin"
+          perl -v | Select-Object -First 2
+
       - name: Install Rust 1.99.1
         uses: dtolnay/rust-toolchain@master
         with:
@@ -59,6 +70,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      # ADR-022: same Strawberry Perl fix as the check job (vendored OpenSSL).
+      - name: Put Strawberry Perl first on PATH
+        run: |
+          if (-not (Test-Path "C:\Strawberry\perl\bin\perl.exe")) { throw "Strawberry Perl not found at C:\Strawberry\perl\bin" }
+          Add-Content $env:GITHUB_PATH "C:\Strawberry\perl\bin"
+          perl -v | Select-Object -First 2
 
       - name: Install Rust 1.99.1
         uses: dtolnay/rust-toolchain@master

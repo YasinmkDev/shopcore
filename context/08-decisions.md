@@ -75,6 +75,9 @@ Rust pinned in `rust-toolchain.toml` (edition 2024); Node/pnpm pinned via the ro
 ## ADR-021 — `just check` is defined once, in AGENTS.md. Accepted 2026-11-09
 `just check` = fmt + clippy (`-D warnings`) + `cargo deny` + nextest + tsc + eslint + vitest. CI adds `just bench`, migration tests, installer build, `pnpm audit`, and secret scanning when their specs land. Why: `AGENTS.md` and `09-engineering-standards.md` previously defined `just check` differently (deny included in one, missing in the other).
 
+## ADR-022 — Vendored OpenSSL on Windows CI needs Strawberry Perl first on PATH. Accepted 2026-11-10
+Risk R2 (spec 000) triggered on the first Windows CI run: `openssl-sys` (vendored OpenSSL, for SQLCipher) failed at OpenSSL's `Configure` because the `perl` on PATH was Git's MSYS2 perl, which lacks the core module `Locale::Maketext::Simple`. Fix: CI prepends `C:\Strawberry\perl\bin` (Strawberry Perl is preinstalled on the runner) to PATH in both jobs, before any cargo step. Why this over the R2 fallback (vcpkg OpenSSL + `sqlcipher` feature): it keeps the approved dependency and feature exactly as specified — no dependency change, no new package manager, no extra build time. If Strawberry Perl ever leaves the runner image, fall back to R2's vcpkg route via a new ADR.
+
 ## Open questions
 - Launch markets, fiscal/tax rules, currencies, languages.
 - First payment terminal integration.
