@@ -9,6 +9,13 @@ jobs:
   check:
     # ADR-015: windows-latest only for now; Linux/macOS matrix comes later.
     runs-on: windows-latest
+    # ADR-022: openssl-src runs the perl named by OPENSSL_SRC_PERL (else
+    # PERL, else PATH). Pin it to Strawberry Perl: the runner's PATH perl
+    # is Git's MSYS2 perl, which lacks Locale::Maketext::Simple and fails
+    # OpenSSL's Configure. PATH prepending alone did not change which perl
+    # the build script resolved.
+    env:
+      OPENSSL_SRC_PERL: 'C:\Strawberry\perl\bin\perl.exe'
     steps:
       - uses: actions/checkout@v4
 
@@ -22,6 +29,7 @@ jobs:
           if (-not (Test-Path "C:\Strawberry\perl\bin\perl.exe")) { throw "Strawberry Perl not found at C:\Strawberry\perl\bin" }
           Add-Content $env:GITHUB_PATH "C:\Strawberry\perl\bin"
           perl -v | Select-Object -First 2
+          where.exe perl
 
       - name: Install Rust 1.99.1
         uses: dtolnay/rust-toolchain@master
@@ -68,6 +76,9 @@ jobs:
     # otherwise a later spec's job.
     needs: check
     runs-on: windows-latest
+    # ADR-022: same Strawberry Perl pin as the check job (vendored OpenSSL).
+    env:
+      OPENSSL_SRC_PERL: 'C:\Strawberry\perl\bin\perl.exe'
     steps:
       - uses: actions/checkout@v4
 
