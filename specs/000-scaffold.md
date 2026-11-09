@@ -34,7 +34,7 @@ Out of scope (later specs):
 
 1. `just setup` installs the pinned Rust toolchain (rustup), pnpm (corepack), and `just` if missing, then runs `pnpm install` and `cargo fetch`. (Extra recipe beyond `AGENTS.md`'s list; needed because a fresh machine has none of these. This VM currently has none of cargo/rustc/pnpm/just installed — only Node 24.22.1.)
 2. `just check` runs, in order: `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets` with `-D warnings`; `cargo deny check`; `cargo nextest run --workspace`; `pnpm install --frozen-lockfile`; `pnpm -r run typecheck` (`tsc --noEmit`); `pnpm -r run lint` (ESLint, zero warnings); `pnpm -r run test` (`vitest run`). It must exit 0 on an empty app.
-3. `just dev` starts the Tauri desktop app with Vite hot reload (`tauri dev` from `crates/desktop`; `beforeDevCommand` runs the UI dev server).
+3. `just dev` starts the Tauri desktop app with Vite hot reload (`tauri dev` from the desktop crate root `crates/desktop/src-tauri`; `beforeDevCommand` runs the UI dev server).
 4. `just test` runs Rust + TS tests only. `just bench` prints "no benchmarks yet" and exits 0 (stub — `crates/bench` is an empty crate; real benchmarks come with the Phase 0 benchmark spec).
 5. `just gen-types` regenerates `packages/protocol-ts/src/generated.ts` from `crates/protocol` via `ts-rs`; the file carries a "generated — do not edit" header. CI verifies it is up to date (run `just gen-types` and fail on `git diff`).
 6. `just migrate` prints "no migrations yet" and exits 0 (stub — first migration lands with the DB spec). `just seed-large` prints "no seeder yet" and exits 0 (stub — lands with the Phase 0 benchmark spec).
@@ -126,7 +126,9 @@ Deviations and findings from implementation. None change the approved scope; all
 - **Local VM notes (not repo changes):** this VM has Node 24.22.1 (the pinned 22.23.4 is what CI installs); pnpm was installed via `npm install -g` because corepack is absent here. The VM was replaced mid-session (system packages reset, `/tmp` cleaned) — Tauri Linux libs were reinstalled afterwards. `libzstd1` had to be downgraded from the image's `+hatch1` build to stock `1.5.5+dfsg2-2build1.1` (same upstream version; dry-run showed only that package affected) or `libwebkit2gtk-4.1-dev` would not install. pnpm reports a peer warning: `eslint-plugin-jsx-a11y@6.10.2` wants ESLint ^3–^9 while we pin ESLint 10.14.0 — the plugin loads and lints fine under ESLint 10; warning only.
 - **Not verified on this VM:** the manual `just dev` click-through (press Ping, see `pong`) — the app boots and stays alive under Xvfb (see session summary), but there is no screenshot/click tooling on this VM. The round-trip is proven by the Rust unit test, the Vitest component tests, and the registered command name matching the frontend invoke. The click-through is a Windows manual check.
 - **CI build job added 2026-11-10 (user request, exe for testing):** `just build` recipe + a `build-windows` job in `ci.yml` (runs after `check` is green, uploads the Windows `.exe` + NSIS/MSi bundles as an artifact). This is outside spec 000's original "CI runs `just check` only" scope — added because the user asked for a test exe; installer distribution itself is still a later spec's job. No dependency or invariant changed.
-- **`just dev` / `just build` recipe fix 2026-11-10:** the recipes originally called the Tauri CLI via `pnpm --filter @shopcore/ui exec tauri …`, but `pnpm exec` re-chroots into `apps/ui`, so the CLI panicked ("Couldn't recognize the current folder as a Tauri project"). Both recipes now call `../../apps/ui/node_modules/.bin/tauri` directly from `crates/desktop` (verified with `tauri info`). Same bug affected `just dev` — it had never been run end-to-end before this fix.
+- **`just dev` / `just build` recipe fix 2026-11-10:** the recipes originally called the Tauri CLI via `pnpm --filter @shopcore/ui exec tauri …`, but `pnpm exec` re-chroots into `apps/ui`, so the CLI panicked ("Couldn't recognize the current folder as a Tauri project"). Both recipes now call the CLI binary in `apps/ui/node_modules/.bin` directly (verified with `tauri info`).
+- **Desktop crate moved to the standard Tauri layout 2026-11-10 (spec correction):** the Appendix A tree put `Cargo.toml` at `crates/desktop/` with `main.rs`/`build.rs` under `src-tauri/` — but the Tauri CLI requires `src-tauri/Cargo.toml` and fails at once without it ("failed to watch …/src-tauri/Cargo.toml"), so `just dev` (FR3) and `just build` could never run. The crate root is now `crates/desktop/src-tauri/` (`Cargo.toml`, `build.rs`, `tauri.conf.json`, `src/main.rs`). This also removes the `config_path` + `codegen` workarounds in `build.rs`/`main.rs` (plain `tauri_build::build()` + `generate_context!()` now work). ADR-018's layout decision stands; only the crate-root location is corrected.
+- **`frontendDist` corrected 2026-11-10 (same correction):** it was `../../apps/ui/dist`, which only resolved by accident from the old crate root — the CLI resolves it from the config dir, where it pointed at nonexistent `crates/apps/ui/dist`. It is now `../../../apps/ui/dist` (config dir = manifest dir = `src-tauri/`, so one value serves both). Consequence: the earlier Linux debug binary/Xvfb smoke test may have embedded no frontend — the window staying alive did not prove the UI rendered. The CLI build (which errors loudly when the dist is missing) is the real check.
 - **VM replaced again 2026-11-10:** system packages (Tauri Linux libs) and the npm-global pnpm were wiped a second time. The fresh `just check` run failed at the nextest link step (`-lgtk-3`, `-lwebkit2gtk-4.1` not found) — environment only, not code; fmt/clippy/deny passed in the same run. Libs + pnpm reinstalled the same way as 2026-11-09; re-run pending. Windows CI is unaffected (WebView2, no webkit libs).
 
 ---
@@ -148,7 +150,7 @@ crates/
   db/Cargo.toml src/lib.rs            # rusqlite SQLCipher dep, doc comment, no code yet
   hardware/Cargo.toml src/lib.rs      # empty, doc comment
   protocol/Cargo.toml src/lib.rs src/bin/gen_types.rs  # Pong + ts-rs export
-  desktop/Cargo.toml src-tauri/{tauri.conf.json, capabilities/default.json, main.rs, build.rs}
+  desktop/src-tauri/{Cargo.toml, build.rs, tauri.conf.json, capabilities/default.json, src/main.rs}
   hub/Cargo.toml src/main.rs          # stub binary, no deps
   server/Cargo.toml src/main.rs       # stub binary, no deps
   bench/Cargo.toml src/lib.rs         # empty, doc comment
@@ -165,7 +167,7 @@ tests/golden/.gitkeep  tests/e2e/.gitkeep
 .github/workflows/ci.yml            # windows-latest: setup toolchain/pnpm/just, just check, gen-types freshness
 ```
 
-Tauri wiring (recorded decision, not a conflict): `crates/desktop/src-tauri/tauri.conf.json` sets `frontendDist: "../../apps/ui/dist"`, `beforeDevCommand: "pnpm --filter @shopcore/ui dev"`, `beforeBuildCommand: "pnpm --filter @shopcore/ui build"`, `devUrl: "http://localhost:1420"`. `just dev` runs `cargo tauri dev` from `crates/desktop`.
+Tauri wiring (recorded decision, not a conflict): `crates/desktop/src-tauri/tauri.conf.json` sets `frontendDist: "../../../apps/ui/dist"`, `beforeDevCommand: "pnpm --filter @shopcore/ui dev"`, `beforeBuildCommand: "pnpm --filter @shopcore/ui build"`, `devUrl: "http://localhost:1420"`. `just dev` runs the Tauri CLI from `crates/desktop/src-tauri`.
 
 ## Appendix B — Tokens (verbatim copy from `context/10-ui-system.md`, to be placed in `packages/ui-kit/tokens.css`)
 

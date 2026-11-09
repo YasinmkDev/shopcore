@@ -62,8 +62,9 @@ The < 60 MB installer budget in `05-performance-budgets.md` applies to the onlin
 ## ADR-017 — Single currency per tenant in v1. Accepted 2026-11-09
 `Money` stays `i64` minor units of the tenant's single currency. Multi-currency is Phase 3 reporting/conversion only. Why: the `Money` newtype carries no currency field, so two currencies would be indistinguishable in the type system. Rejected: multi-currency money in v1. Consequence: if true multi-currency money is ever needed, `Money` gains a currency field via ADR.
 
-## ADR-018 — Tauri layout: `crates/desktop/src-tauri`, `frontendDist` → `../../apps/ui/dist`. Accepted 2026-11-09
-Why: keeps the repo layout in `03-architecture.md` (Tauri app in `crates/desktop`, UI in `apps/ui`) while satisfying Tauri 2's `src-tauri` convention. Consequence: `just dev` runs `cargo tauri dev` from `crates/desktop`; `beforeDevCommand`/`beforeBuildCommand` run the UI via pnpm filter.
+## ADR-018 — Tauri layout: `crates/desktop/src-tauri`, `frontendDist` → `../../../apps/ui/dist`. Accepted 2026-11-09
+Why: keeps the repo layout in `03-architecture.md` (Tauri app in `crates/desktop`, UI in `apps/ui`) while satisfying Tauri 2's `src-tauri` convention. Consequence: `just dev` runs the Tauri CLI from `crates/desktop/src-tauri`; `beforeDevCommand`/`beforeBuildCommand` run the UI via pnpm filter.
+Amendment 2026-11-10: the crate root itself moved into `src-tauri/` (Cargo.toml + build.rs + src/main.rs) — the CLI requires `src-tauri/Cargo.toml` and `just dev`/`just build` could not run without it. The `config_path` + `codegen` workarounds are gone; plain `tauri_build::build()` + `generate_context!()` apply. `frontendDist` corrected to `../../../apps/ui/dist`: the CLI resolves it from the config dir, and the config dir is now one level deeper (it used to resolve from the old crate root, which masked the error — the old debug binary may have embedded no frontend at all).
 
 ## ADR-019 — Clippy denies at workspace level; `#[allow]` only at the top of test modules. Accepted 2026-11-09
 Denied outside tests: `unwrap_used`, `expect_used`, `panic`, `indexing_slicing` (plus `clippy::pedantic` selectively, enforced by `-D warnings` in `just check`). Why: the denies must cover all lib code; test code needs unwraps to stay readable. Rejected: per-crate lint tables (drift), blanket allows in lib code (never).

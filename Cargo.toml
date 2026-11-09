@@ -6,7 +6,7 @@ members = [
     "crates/db",
     "crates/hardware",
     "crates/protocol",
-    "crates/desktop",
+    "crates/desktop/src-tauri",
     "crates/hub",
     "crates/server",
     "crates/bench",

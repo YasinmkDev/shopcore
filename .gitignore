@@ -1,6 +1,6 @@
 /target
 node_modules
 dist
-crates/desktop/gen
+crates/desktop/src-tauri/gen
 *.log
 .DS_Store

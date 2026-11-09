@@ -9,7 +9,7 @@ description = "ShopCore desktop: Tauri 2 shell (Windows first) embedding the cor
 
 [[bin]]
 name = "shopcore-desktop"
-path = "src-tauri/main.rs"
+path = "src/main.rs"
 
 [dependencies]
 tauri = { workspace = true }
@@ -22,11 +22,10 @@ shopcore-core = { workspace = true }
 shopcore-protocol = { workspace = true }
 
 [build-dependencies]
-# The `codegen` feature makes the build script write the app context to
-# OUT_DIR, which main.rs includes via `tauri::tauri_build_context!()`.
-# Needed because the config lives in src-tauri/, not next to Cargo.toml
-# (see build.rs).
-tauri-build = { version = "2.7.4", features = ["codegen"] }
+# Standard layout since 2026-11-10: Cargo.toml sits in src-tauri/ next to
+# tauri.conf.json, so plain tauri_build::build() finds the config and
+# main.rs uses tauri::generate_context!(). No codegen feature needed.
+tauri-build = { version = "2.7.4", features = [] }
 
 [lints]
 workspace = true
