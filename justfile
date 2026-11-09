@@ -13,9 +13,12 @@ setup:
     cargo fetch
 
 # Run the desktop app with hot reload (Tauri dev server, from crates/desktop).
+# NOTE: the Tauri CLI is called by its node_modules/.bin path, NOT via
+# `pnpm --filter @shopcore/ui exec` — pnpm exec re-chroots to apps/ui and
+# the CLI then cannot find src-tauri/tauri.conf.json (hit 2026-11-10).
 [working-directory: 'crates/desktop']
 dev:
-    pnpm --filter @shopcore/ui exec tauri dev
+    ../../apps/ui/node_modules/.bin/tauri dev
 
 # Build the desktop app for the current OS (Tauri build, from crates/desktop).
 # On Windows CI this produces target/release/shopcore-desktop.exe plus the
@@ -23,7 +26,7 @@ dev:
 # installer distribution is otherwise a later spec's job.
 [working-directory: 'crates/desktop']
 build:
-    pnpm --filter @shopcore/ui exec tauri build
+    ../../apps/ui/node_modules/.bin/tauri build
 
 # Full gate. Must exit 0 before any work is considered done.
 check:
