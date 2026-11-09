@@ -1,0 +1,15 @@
+[package]
+name = "shopcore-protocol"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "ShopCore protocol: shared request/response/event types and the sync wire format. TypeScript types are generated from here via ts-rs (just gen-types)."
+
+[dependencies]
+serde = { workspace = true }
+ts-rs = { workspace = true }
+
+[lints]
+workspace = true

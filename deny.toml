@@ -1,0 +1,42 @@
+# cargo-deny configuration (see 09-engineering-standards.md).
+# `just check` runs `cargo deny check`; advisories are denied, licences are
+# allow-listed (permissive only), and wildcard dependencies are banned.
+
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = []
+
+[licenses]
+# Workspace crates are proprietary and never published (publish = false);
+# cargo-deny ignores them instead of demanding an SPDX license.
+private = { ignore = true }
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "OpenSSL",
+    # MPL-2.0: weak (file-level) copyleft. Pulled in only by Tauri's
+    # transitive HTML/CSS parsing deps (cssparser, selectors, ...).
+    # Linking is unaffected; the MPL files themselves stay under MPL.
+    "MPL-2.0",
+    # WTFPL + blessing: public-domain-equivalent licences used by
+    # sqlcipher-src (SQLite's blessing) — transitive dep of rusqlite.
+    "WTFPL",
+    "blessing",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"

@@ -1,0 +1,13 @@
+[package]
+name = "shopcore-bench"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "ShopCore benchmarks: seeds data (just seed-large) and measures the budgets in 05-performance-budgets.md."
+
+[dependencies]
+
+[lints]
+workspace = true

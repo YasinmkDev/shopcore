@@ -1,0 +1,32 @@
+[package]
+name = "shopcore-desktop"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "ShopCore desktop: Tauri 2 shell (Windows first) embedding the core. The UI renders state and sends intents; all logic lives in Rust."
+
+[[bin]]
+name = "shopcore-desktop"
+path = "src-tauri/main.rs"
+
+[dependencies]
+tauri = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+shopcore-core = { workspace = true }
+shopcore-protocol = { workspace = true }
+
+[build-dependencies]
+# The `codegen` feature makes the build script write the app context to
+# OUT_DIR, which main.rs includes via `tauri::tauri_build_context!()`.
+# Needed because the config lives in src-tauri/, not next to Cargo.toml
+# (see build.rs).
+tauri-build = { version = "2.7.4", features = ["codegen"] }
+
+[lints]
+workspace = true

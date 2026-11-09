@@ -1,0 +1,13 @@
+[package]
+name = "shopcore-hardware"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "ShopCore hardware: driver traits + implementations + mock drivers (printer, scanner, drawer, scale, display, payment terminal, label printer)."
+
+[dependencies]
+
+[lints]
+workspace = true

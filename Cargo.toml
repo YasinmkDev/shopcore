@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain",
+    "crates/core",
+    "crates/db",
+    "crates/hardware",
+    "crates/protocol",
+    "crates/desktop",
+    "crates/hub",
+    "crates/server",
+    "crates/bench",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99.1"
+license = "Proprietary"
+
+[workspace.dependencies]
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tracing = "0.1.44"
+uuid = { version = "1.29.2", features = ["v7"] }
+ts-rs = "12.0.1"
+rusqlite = { version = "0.41.1", features = ["bundled-sqlcipher-vendored-openssl"] }
+tauri = "2.12.5"
+shopcore-domain = { path = "crates/domain", version = "0.1.0" }
+shopcore-core = { path = "crates/core", version = "0.1.0" }
+shopcore-protocol = { path = "crates/protocol", version = "0.1.0" }
+
+# Workspace lints (ADR-019): denies apply everywhere, including tests.
+# Test modules carry an explicit `#[allow(...)]` at the top of the module
+# when they need an otherwise-denied operation. Never allow in lib code.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"

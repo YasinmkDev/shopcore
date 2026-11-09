@@ -1,0 +1,13 @@
+[package]
+name = "shopcore-hub"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "ShopCore hub: headless LAN service for multi-till stores (Phase 5). Owns the store DB and syncs with cloud."
+
+[dependencies]
+
+[lints]
+workspace = true

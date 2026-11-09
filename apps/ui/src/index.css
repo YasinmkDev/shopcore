@@ -1,0 +1,43 @@
+@import "tailwindcss";
+@import "@shopcore/ui-kit/tokens.css";
+
+/* Tailwind v4 mapping: tokens.css variables -> utilities.
+   Components use these utilities only — never raw hex values. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-subtle: var(--surface-subtle);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-muted: var(--text-muted);
+  --color-faint: var(--text-faint);
+  --color-on-accent: var(--text-on-accent);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-active: var(--accent-active);
+  --color-accent-subtle: var(--accent-subtle);
+  --color-focus-ring: var(--focus-ring);
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+  --radius-sm: var(--radius-sm);
+  --radius: var(--radius);
+  --radius-lg: var(--radius-lg);
+  --shadow-pop: var(--shadow-pop);
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  /* Inter is bundled locally per 10-ui-system.md; that lands with spec 000b.
+     Until then the system stack applies. */
+  font-family: system-ui, "Segoe UI", sans-serif;
+  font-variant-numeric: tabular-nums;
+}

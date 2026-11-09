@@ -1,0 +1,13 @@
+[package]
+name = "shopcore-server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "ShopCore cloud server: Axum + PostgreSQL, tenant row-level security, monthly partitions, job queue (Phase 5)."
+
+[dependencies]
+
+[lints]
+workspace = true

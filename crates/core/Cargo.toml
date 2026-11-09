@@ -1,0 +1,21 @@
+[package]
+name = "shopcore-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "ShopCore core: application services / use cases, DB actor, sync engine, permissions. The UI talks to the core only through Tauri commands (embedded) or HTTP (hub)."
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+shopcore-domain = { workspace = true }
+shopcore-protocol = { workspace = true }
+
+[lints]
+workspace = true
