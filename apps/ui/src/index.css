@@ -1,6 +1,13 @@
 @import "tailwindcss";
 @import "@shopcore/ui-kit/tokens.css";
 
+/* Tailwind v4 scans only files under the Vite root (apps/ui) by default.
+   The ui-kit package lives outside it (consumed via the pnpm workspace
+   symlink in node_modules, which the scanner skips), so its classes were
+   never generated — the StatusPill rendered unstyled (icon stacked above
+   the label, no success colours) in the shipped app. This source fixes it. */
+@source "../../../packages/ui-kit/src";
+
 /* Tailwind v4 mapping: tokens.css variables -> utilities.
    Components use these utilities only — never raw hex values. */
 @theme inline {

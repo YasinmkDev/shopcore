@@ -15,6 +15,18 @@ function makeClient(outcome: Pong | Error): CoreClient {
 }
 
 describe("Shell", () => {
+  it("pins the status bar to the bottom of a full-height column", () => {
+    render(<Shell client={makeClient({ message: "pong" })} />);
+    const footer = screen.getByRole("contentinfo");
+    const root = footer.parentElement;
+    expect(root).not.toBeNull();
+    // Root fills the viewport (min-height 100vh) as a column.
+    expect(root).toHaveClass("min-h-screen", "flex", "flex-col");
+    // Status bar is the last element; the content area takes the slack.
+    expect(root?.lastElementChild).toBe(footer);
+    expect(screen.getByRole("main")).toHaveClass("flex-1");
+  });
+
   it("shows the pong message after ping", async () => {
     render(<Shell client={makeClient({ message: "pong" })} />);
     fireEvent.click(screen.getByRole("button", { name: "Ping" }));

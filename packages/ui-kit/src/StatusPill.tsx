@@ -33,7 +33,7 @@ export function StatusPill({ status, label }: StatusPillProps): ReactElement {
   return (
     <span
       role="status"
-      className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm font-medium ${STATUS_STYLES[status]}`}
+      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-sm font-medium ${STATUS_STYLES[status]}`}
     >
       <Icon size={16} strokeWidth={1.5} aria-hidden="true" />
       {label}

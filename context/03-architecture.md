@@ -32,7 +32,11 @@ crates/
   db/            # migrations (SQL), queries, FTS, aggregates
   hardware/      # driver traits + implementations + mock drivers
   protocol/      # shared request/response/event types, sync wire format
-  desktop/       # Tauri app (embeds core)
+  desktop/       # Tauri app (embeds core). The crate root is
+                 # `crates/desktop/src-tauri/` (Cargo.toml, build.rs,
+                 # tauri.conf.json, src/main.rs, capabilities/, icons/) —
+                 # the Tauri CLI requires `src-tauri/Cargo.toml` (ADR-023).
+                 # `crates/desktop/` itself holds only `src-tauri/`.
   hub/           # headless LAN service
   server/        # cloud API (Axum)
   bench/         # perf benchmarks + large-dataset seeding (see 05)

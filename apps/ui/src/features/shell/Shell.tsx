@@ -29,12 +29,12 @@ export function Shell({ client }: { client: CoreClient }): ReactElement {
   }
 
   return (
-    <div className="min-h-screen bg-bg text-text" data-theme="light">
+    <div className="flex min-h-screen flex-col bg-bg text-text" data-theme="light">
       <header className="flex items-center justify-between border-b border-border px-6 py-3">
         <h1 className="text-lg font-semibold">{t("app.title")}</h1>
         <StatusPill status="online" label={t("status.online")} />
       </header>
-      <main className="mx-auto max-w-xl px-6 py-10">
+      <main className="mx-auto flex-1 px-6 py-10">
         <p className="mb-4 text-muted">{t("shell.hint")}</p>
         <button
           type="button"

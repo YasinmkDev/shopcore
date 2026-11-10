@@ -15,4 +15,13 @@ describe("StatusPill", () => {
     expect(pill).toHaveTextContent(label);
     expect(pill.querySelector("svg")).not.toBeNull();
   });
+
+  it("renders online with success tokens and an inline layout", () => {
+    render(<StatusPill status="online" label="Online" />);
+    const pill = screen.getByRole("status");
+    // --success text/icon on --success-bg (context/10-ui-system.md tokens).
+    expect(pill).toHaveClass("bg-success-bg", "text-success");
+    // Inline: icon, 6px gap, label, vertically centered.
+    expect(pill).toHaveClass("inline-flex", "items-center", "gap-1.5");
+  });
 });
