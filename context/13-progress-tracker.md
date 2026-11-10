@@ -1,27 +1,29 @@
 # 13 — Progress Tracker (update at the end of every session)
 
 ## Current phase
-Phase 0 — Foundations and spikes
+Phase 0 — Foundations and spikes — **In progress** (spec 000 done; specs 002–005 drafted, not yet approved; spec 001 blocked until Phase 0 passes)
 
 ## Status board
 | Spec | Title | Status | Notes |
 |---|---|---|---|
 | 000 | Repo scaffold + CI + `just check` | Done | Implemented 2026-11-09; `just check` green (local Linux + Windows CI). Repo: github.com/YasinmkDev/shopcore (public, main). Windows exe delivered 2026-11-10 (GoFile https://gofile.io/d/rrHlhKea). Manual Ping click-through PASSED on the user's Windows 10 (screenshot: Online pill, Ping → "Core replied: pong", Ready footer). Defect fix 2026-11-10 (his report): pill unstyled + icon stacked + footer not pinned — root cause Tailwind v4 never scanned `packages/ui-kit` (see session log). Fixed exe rebuilt + delivered (see session log). |
-| 000b | ui-kit: Button, TextField + dark-theme wiring | Spec drafted | `specs/000b-ui-kit-button-textfield-dark.md` (drafted 2026-11-09, needs human approval before implementation) |
-| 001 | Checkout: scan → cart → cash sale → receipt | Spec drafted | `specs/001-checkout-sale.md` |
-| — | Hardware spikes (printer, scanner, drawer) | Not started | see 06 |
-| — | Benchmark on weakest PC | Not started | fill table in 08 |
-| — | Two-node sync spike | Not started | |
+| 000b | ui-kit: Button, TextField + dark-theme wiring | Spec drafted | `specs/000b-ui-kit-button-textfield-dark.md` (drafted 2026-11-09, needs human approval before implementation). May run while hardware for 003/004 is being sourced. |
+| 002 | Benchmark harness + Phase 0 performance gate | Spec drafted | `specs/002-benchmark-harness.md` (received 2026-11-10, needs human approval). FIRST in Phase 0 order. Decides ADR-002 (Tauri vs Electron fallback). |
+| 003 | Receipt printer, RTL text + cash drawer spike | Spec drafted | `specs/003-printer-spike.md` (received 2026-11-10, needs human approval). Needs a real 80 mm ESC/POS printer; mock devices until hardware arrives. |
+| 004 | Barcode scanner capture + parsing spike | Spec drafted | `specs/004-scanner-spike.md` (received 2026-11-10, needs human approval). Needs a USB keyboard-wedge scanner; mock devices until hardware arrives. |
+| 005 | Two-node sync spike (outbox → server → pull) | Spec drafted | `specs/005-sync-spike.md` (received 2026-11-10, needs human approval). Depends on 000 + 002. May run in parallel with 003/004. |
+| 001 | Checkout: scan → cart → cash sale → receipt | Blocked | `specs/001-checkout-sale.md`. Blocked until Phase 0 passes (specs 002–005). Its header still says "Depends on: 000, Phase 0 spikes (printer, scanner)" — must be updated to 002–005 (see review 2026-11-10). |
 
 Status values: Not started · Spec drafted · Spec approved · In progress · In review · Done · Blocked.
 
 ## Decisions pending (need human)
 - Launch markets, tax/fiscal rules, currencies, languages
 - First payment terminal
-- Weakest supported PC (replace assumption ADR-011)
+- Weakest supported PC (replace assumption ADR-011) — now blocking spec 002's gate: name the test machine, or confirm the ADR-011 4 GB / Win10 / SSD machine as the test machine
 
 ## Session log (newest first)
 | Date | What was done | Tests | Next |
+| 2026-11-10 | Phase 0 correction (user's order): the plan summary had skipped Phase 0. Specs 002–005 received as a zip (they were not in `specs/` — extracted there) and reviewed against the context files; conflicts/gaps listed in the review reply (criterion vs hdrhistogram, CI 500k vs 10k smoke, spec 001's dependency line, spec 005's Linux runner vs ADR-015, spec 004's ScanCapture in ui-kit, print_job missing 04's table columns, weakest-PC machine still unnamed). Tracker corrected: 000b + 002–005 listed, Phase 0 in progress, spec 001 blocked. Order: 002 first, then 000b (while hardware is sourced), then 003/004 on real hardware (mocks until then), 005 in parallel with 003/004, then 001. No code written — waiting on approval. | None (review only). | Approve spec 002 + its dependency pins (rand 0.10.3, hdrhistogram 7.6.0), name the weakest-PC test machine, approve the review's proposed fixes. |
 |---|---|---|---|
 | 2026-11-09 | Spec 000 implemented: Cargo + pnpm workspaces, rust-toolchain 1.99.1, justfile, CI (windows-latest), lint/format/deny configs, Tauri shell (white theme, StatusPill, ping round-trip), gen-types via ts-rs. ADRs 013–021 recorded. | `just check` green: fmt, clippy -D warnings (workspace), cargo deny (all ok), nextest 2 passed, tsc x4, eslint x3, vitest 3+4 passed. gen-types freshness verified (identical md5). Xvfb boot smoke: app stayed alive 20s, no panic. | Spec 000b (Button/TextField + dark-theme wiring) or spec 001 (checkout) after Phase 0 printer/scanner spikes. Manual Ping click-through still to do on Windows. |
 | 2026-11-10 | Spec compliance re-verified FR1–10 + pins + tokens + file tree; `just check` re-run green. Fixed real gaps found: (1) desktop crate moved to standard Tauri layout (`crates/desktop/src-tauri` crate root — the CLI requires `src-tauri/Cargo.toml`, `just dev`/`just build` could never run); (2) `frontendDist` corrected to `../../../apps/ui/dist` (old value resolved by accident; old debug binary may have embedded no frontend); (3) `just dev`/`just build` now call the Tauri CLI binary directly (pnpm exec re-chroots to apps/ui). Pushed to github.com/YasinmkDev/shopcore (public). CI fixes across 5 runs: dtolnay/rust-toolchain (rust-lang action doesn't exist), OPENSSL_SRC_PERL pin to Strawberry Perl (ADR-022, R2 triggered), `icons/icon.ico` added (tauri-build needs it on Windows), `.ico` added to `bundle.icon` (bundler needs it). Windows `check` job green; `build-windows` green — exe + NSIS + MSI uploaded as artifact `shopcore-windows-0.1.0`, downloaded and verified (PE x64, MSI OLE, embedded frontend). Delivered via GoFile https://gofile.io/d/rrHlhKea (verified 200). | `just check` green locally (Linux) and on Windows CI. Local `just build` (Linux) exit 0; embedded assets verified (Brotli blobs decompress to the exact dist files, incl. "Core replied"). Release binary boots 20s under Xvfb, no panic. Windows exe verified as PE32+ x64, 8.5 MB. | Manual Ping click-through PASSED on the user's Windows 10 (2026-11-10, screenshot). User asked why the UI is all blank white — answered: spec 000 is the scaffold only, the real shop UI comes with 000b/001. Next: his pick, 000b or 001. |
