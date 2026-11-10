@@ -1,7 +1,7 @@
 # Spec 001 — Checkout: scan → cart → cash sale → receipt
 
 Status: Draft (needs human approval before implementation)
-Phase: 1   Depends on: 000 (scaffold), Phase 0 spikes (printer, scanner)
+Phase: 1   Depends on: 000 (scaffold), Phase 0 (002, 003, 004, 005) — blocked until Phase 0 passes
 
 ## Goal
 A cashier scans items, sees the cart and total instantly, takes cash payment with change, and a receipt prints, entirely offline.

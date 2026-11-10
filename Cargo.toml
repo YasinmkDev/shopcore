@@ -26,6 +26,11 @@ tracing = "0.1.44"
 uuid = { version = "1.29.2", features = ["v7"] }
 ts-rs = "12.0.1"
 rusqlite = { version = "0.41.1", features = ["bundled-sqlcipher-vendored-openssl"] }
+# Spec 002 (approved 2026-11-10, proof: `cargo info` + lockfile in the session
+# summary): rand for seeded deterministic data generation, hdrhistogram for
+# p50/p95/p99 latency percentiles. Exact pins; never bump as a side effect.
+rand = "0.10.3"
+hdrhistogram = "7.6.0"
 tauri = "2.12.5"
 shopcore-domain = { path = "crates/domain", version = "0.1.0" }
 shopcore-core = { path = "crates/core", version = "0.1.0" }

@@ -3,6 +3,7 @@
     "@shopcore/i18n": "workspace:*",
     "@shopcore/protocol-ts": "workspace:*",
     "@shopcore/ui-kit": "workspace:*",
+    "@tanstack/react-virtual": "3.14.26",
     "@tauri-apps/api": "2.12.4",
     "react": "19.3.1",
     "react-dom": "19.3.1"

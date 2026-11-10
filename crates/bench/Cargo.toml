@@ -7,7 +7,22 @@ license.workspace = true
 publish = false
 description = "ShopCore benchmarks: seeds data (just seed-large) and measures the budgets in 05-performance-budgets.md."
 
+[[bin]]
+name = "shopcore-bench"
+path = "src/main.rs"
+
 [dependencies]
+# rusqlite is already a workspace dependency (spec 000, ADR-013 pins ts-rs;
+# rusqlite 0.41.1 bundled-sqlcipher-vendored-openssl). The bench DB must use
+# the same SQLCipher engine as the real app, or timings are meaningless.
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# New for spec 002 (approved 2026-11-10, conditional on the proof in the
+# session summary): rand 0.10.3, hdrhistogram 7.6.0 — see [workspace.dependencies].
+rand.workspace = true
+hdrhistogram.workspace = true
 
 [lints]
 workspace = true

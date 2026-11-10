@@ -52,10 +52,23 @@ test:
     pnpm --filter @shopcore/ui-kit run test
 
 # Performance benchmarks against the budgets in 05-performance-budgets.md.
-# Stub in spec 000: crates/bench is an empty crate. Real benchmarks land
-# with the Phase 0 benchmark spec.
+# Full gate (spec 002): runs all scenarios on the seeded database and
+# writes target/bench/results/results.json + results.md. Manual run on the
+# target PC; dev-machine numbers are PROVISIONAL. Run `just seed-large`
+# first (the runner errors clearly if the database is missing).
 bench:
-    echo no benchmarks yet
+    cargo run --release -p shopcore-bench -- run --size full --db target/bench/bench.db --out target/bench/results
+
+# CI smoke: seeds the 10k-row dataset, runs the scenarios, compares against
+# the stored baseline (relative tripwire: fails only on >2x regression).
+# Not an absolute budget check (05, amendment 2).
+bench-smoke:
+    cargo run --release -p shopcore-bench -- seed --size smoke --db target/bench/bench-smoke.db
+    cargo run --release -p shopcore-bench -- run --size smoke --db target/bench/bench-smoke.db --out target/bench/smoke-results
+
+# Refresh the stored CI smoke baseline deliberately (never automatic).
+bench-update-baseline:
+    cargo run --release -p shopcore-bench -- run --size smoke --db target/bench/bench-smoke.db --out target/bench/smoke-results --update-baseline
 
 # Regenerate TypeScript types from Rust into packages/protocol-ts.
 # Never hand-edit the generated file.
@@ -66,6 +79,10 @@ gen-types:
 migrate:
     echo no migrations yet
 
-# Seed 500k SKUs / 5M sale lines for benchmarking. Stub in spec 000.
+# Seed 500k SKUs / 5M sale lines for benchmarking (spec 002).
 seed-large:
-    echo no seeder yet
+    cargo run --release -p shopcore-bench -- seed --size full --db target/bench/bench.db
+
+# Seed the 10k-row CI smoke dataset (spec 002).
+seed-smoke:
+    cargo run --release -p shopcore-bench -- seed --size smoke --db target/bench/bench-smoke.db

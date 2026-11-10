@@ -9,7 +9,7 @@ Prove we can print a correct receipt (Latin + RTL, logo, QR, barcode), cut, and 
 ## In scope
 - `crates/hardware`: `ReceiptPrinter` trait (+ `MockPrinter`), `PrintDoc` model, ESC/POS encoder, transports: Windows spooler raw (WritePrinter), TCP 9100, and USB if the spooler path is not enough.
 - Layout engine: columns, wrap, alignment, bold/size, divider, logo bitmap, QR, Code128/EAN barcode.
-- **Bitmap text mode**: render lines as images (text shaping for Arabic/Urdu/Hindi etc.) then dither to 1-bit raster. Bundled OFL fonts (e.g., Noto Naskh Arabic, Noto Nastaliq Urdu, Noto Sans). Glyph cache for speed.
+- **Bitmap text mode**: render lines as images (text shaping for Arabic/Urdu/Hindi etc.) then dither to 1-bit raster. Bundled OFL fonts (e.g., Noto Naskh Arabic, Noto Nastaliq Urdu, Noto Sans) in `crates/hardware/assets/fonts/` with their OFL license texts shipped alongside; record the total font size in the session summary. Glyph cache for speed.
 - Persistent print queue (survives restart) with retry/backoff and "DUPLICATE" reprint marker.
 - Status polling: online, paper out, cover open (non-blocking).
 - A debug screen in the app: "Print test receipt", "Open drawer", printer status, queue list.
@@ -25,9 +25,16 @@ Receipt designer UI, real sale integration (spec 001 uses this), label printers,
 5. All device I/O async with timeouts; a hung or unplugged printer never blocks the caller (returns `PRINT_QUEUED`).
 6. Unplug during print, replug, and the queue resumes without app restart; no duplicate receipts.
 7. Mock printer simulates: slow, offline, out of paper, garbled response; contract tests run against mock.
+8. Print while the DB write path is under load (spec 002 scenario 5 setup: background writer inserting batches of 200 rows); checkout latency stays in budget (`06`, spike 4).
 
-## Data / security
-Queue stored in local SQLite table `print_job` (id UUIDv7, payload, status, attempts, created_at). No customer PII in logs.
+## Data changes
+Queue stored in local SQLite table `print_job` (id UUIDv7, tenant_id, payload, status, attempts, created_at, updated_at, deleted_at, version) — per `04-data-and-sync.md` table conventions.
+
+## Security / audit
+No customer PII in logs. Reprints are marked "DUPLICATE" and audit-logged (per `06`).
+
+## Definition of done
+Standard checklist in `AGENTS.md` + all acceptance criteria above met on the real printer.
 
 ## Tests
 ESC/POS encoder golden-byte tests; layout wrap/alignment tests; bitmap render determinism test (golden image hash); queue persistence/restart test; mock failure-mode tests; manual hardware checklist (below) with photos of printed output attached to the session.

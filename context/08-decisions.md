@@ -41,11 +41,24 @@ Receipt print + scanner + drawer, 500k SKU/5M lines benchmark on weakest PC, two
 ### Phase 0 results (fill in)
 | Metric | Budget | Measured | Date |
 |---|---|---|---|
-| Cold start | < 4 s | | |
-| Idle RAM total | < 400 MB | | |
-| Scan → line | < 50 ms | | |
-| Search latency | < 100 ms | | |
-| Hardware spike pass/fail | all pass | | |
+| Cold start | < 4 s | not measured — needs Windows WebView2 run (spec 002 scenario 7, debug route) | — |
+| Idle RAM total | < 400 MB | 20.2 MB peak RSS (runner process only — proxy, not the full app; real gate needs the app) | 2026-11-10 |
+| Scan → line | < 50 ms | barcode warm p95 0.015 ms; cold (fresh connection) 2.180 ms | 2026-11-10 |
+| Search latency | < 100 ms | FTS5 prefix search p95 14.495 ms (p99 30.767 ms) at 500k SKUs | 2026-11-10 |
+| Sale commit (tender → commit) | < 200 ms | p95 36.607 ms (p99 50.879 ms), 6-line sale, synchronous=FULL | 2026-11-10 |
+| Sale commit under load | < 200 ms | p95 33.759 ms (p99 103.679 ms) while background writer + report run | 2026-11-10 |
+| Report (90-day, aggregates) | < 1 s | 0.098 ms from daily_sales_summary | 2026-11-10 |
+| Report (90-day, raw scan) | < 3 s (informational) | 122,014 ms (122 s) from raw sale_line — FAILS, by design: proves the daily aggregates are required | 2026-11-10 |
+| Keyset page (200 rows) | — | p95 ≤ 0.212 ms at depth 0 / 10% / 50% — no degradation with depth | 2026-11-10 |
+| Hot-index build (100k active SKUs) | — | 294.6 ms | 2026-11-10 |
+| Installer sizes | NSIS < 60 MB / MSI ~150 MB | largest artifact 8.479 MB (spec-000 fixed Windows exe) | 2026-11-10 |
+| Hardware spike pass/fail | all pass | pending — specs 003/004 need hardware | — |
+
+**Machine record (all numbers above are PROVISIONAL):** AMD EPYC 9D64 88-Core Processor / 7,934 MiB RAM / Linux, run 2026-11-10T09:26:38Z on the dev VM — NOT the target PC and NOT Windows. Only a run on the weakest PC (ADR-011, still an assumption) counts for the gate. Dataset: full spec-002 set — 500k SKUs (100k active), 600k barcodes, 100k customers, 1.2M sales, 5,397,732 sale lines, 5,397,732 stock movements, 499,987 stock balances; DB 2,295,103,488 bytes. Checksum: `sku=500000,barcode=600000,customer=100000,sale=1200000,sale_line=5397732,stock_movement=5397732,sale_sum=40528237620,line_sum=40528237620` (sale_sum = line_sum, consistency holds). Dataset deviations from spec 002: sale lines 5.40M vs the spec's 5M (seeder averages ~4.5 lines/sale over 1.2M sales); stock movements 5.40M vs the spec's 2M (one movement per sale line — the spec's own numbers imply 5M+, the seeded count is the consistent one). Scenarios 7 (startup) and 8 (UI timings) were not measured in this run — they need the debug route in the app on Windows/WebView2.
+
+**Seed recovery note (2026-11-10):** the full seed ran ~60 min and was killed by a VM/service restart at ~00:49 during the final stock_balance aggregation (single statement = atomic, rolled back; all 1.2M sales were already committed). Recovered by re-running the exact `seed.rs` aggregation SQL. First two attempts stalled: the `(branch_id, sku_id, occurred_at)` index made the planner do 5M random table lookups for `qty_milli`/`tenant_id` (8–13 GB read, ~0 writes). Fixed with `NOT INDEXED` (one sequential scan + in-memory sort, 256 MB cache) — aggregation finished in 279.9 s. The seeded data is identical to a fresh seed (same deterministic seed).
+
+**ADR-002 recommendation (2026-11-10, PROVISIONAL): KEEP Tauri — fallback NOT triggered.** Every budget-checked metric passes on the dev VM (scan, search, commit, report via aggregates, memory proxy, installer). The one failing number is the informational raw-report scan (122 s vs 3 s), which is the spec's own demonstration that daily aggregates are required, not a product failure. The Electron fallback trigger (Phase 0 benchmark failure on the weakest PC) has not fired. The real gate still needs: (a) a run on the weakest PC (ADR-011) on Windows, (b) scenarios 7–8 measured via the debug route, (c) specs 003/004 hardware spikes passing.
 
 ## ADR-013 — Type bridge: ts-rs 12.0.1 (stable). Accepted 2026-11-09
 TS types are generated from Rust with `ts-rs` via `just gen-types` into `packages/protocol-ts`. Why: stable release; the Tauri-2-compatible specta line (`specta 2.0.0-rc.28` + `tauri-specta 2.0.0-rc.26`) is pre-release, and stable `specta` 1.0.5 / `tauri-specta` 1.0.2 target Tauri v1 only. Rejected: specta RC (re-evaluate when 2.x ships stable), hand-written types (drift). Consequence: command bindings stay hand-written in `TauriClient`, typed by the generated types.
@@ -55,6 +68,7 @@ Why: 5.9.3 is the proven line; npm `latest` (7.0.2) is the brand-new native rewr
 
 ## ADR-015 — CI runs on `windows-latest` only (for now). Accepted 2026-11-09
 Why: Windows-first target; the installer build needs Windows; Tauri on Linux needs webkit2gtk system libs. Rejected: Linux/macOS matrix now (comes later). Consequence: `just check` must be green on Windows CI; Linux dev runs are best-effort until the matrix lands.
+Amendment 2026-11-10 (spec 005 review): the server/Postgres chaos tests run on a separate Linux `server-tests` job (ubuntu-latest, Postgres service container) — service containers are not supported on Windows runners. Till-side unit tests also run on the Windows `check` job. The workflow change lands with spec 005; until then no Linux job exists.
 
 ## ADR-016 — Installer budget split: online bootstrapper vs offline installer. Accepted 2026-11-09
 The < 60 MB installer budget in `05-performance-budgets.md` applies to the online bootstrapper (app payload, excluding the WebView2 runtime, which downloads at install time). The offline installer (WebView2 bundled) has a ~150 MB budget. Why: the full offline WebView2 runtime alone exceeds 60 MB, so one budget cannot cover both artifacts. Consequence: record before Phase 6; release ships both artifacts.
@@ -80,6 +94,9 @@ Risk R2 (spec 000) triggered on the first Windows CI run: `openssl-sys` (vendore
 
 ## ADR-023 — Desktop crate lives at the standard Tauri layout: `crates/desktop/src-tauri` is the crate root. Accepted 2026-11-10
 The original spec-000 layout put `Cargo.toml` at `crates/desktop/` with `main.rs`/`build.rs` under `src-tauri/` — the Tauri CLI requires `src-tauri/Cargo.toml` and failed instantly ("failed to watch …/src-tauri/Cargo.toml"), so `just dev` and `just build` could never run. The same split masked a second error: `frontendDist: "../../apps/ui/dist"` only resolved by accident from the old crate root (from the config dir it pointed at nonexistent `crates/apps/ui/dist`), so the first Linux debug binary may have embedded no frontend at all. Decision: the crate root IS `crates/desktop/src-tauri/` (Cargo.toml, build.rs, tauri.conf.json, `src/main.rs`, `capabilities/`, `icons/`); the root workspace lists `crates/desktop/src-tauri` as a member; `frontendDist` is `../../../apps/ui/dist` (one value serves CLI + codegen, since the config dir is now the manifest dir); `just dev`/`just build` invoke the Tauri CLI binary directly from `crates/desktop/src-tauri` (pnpm `--filter` re-chroots into `apps/ui` and the CLI cannot find the config). Rejected: keeping `Cargo.toml` at `crates/desktop/` with `config_path` + `codegen` workarounds — fragile, CLI-incompatible, and it hid the frontendDist error. Consequence: the repo layout in `03-architecture.md` now records this; `just dev`/`just build` are the only supported entry points for the desktop app. This formalizes the ADR-018 amendment of 2026-11-10.
+
+## ADR-024 — Spike specs use the short format plus Data changes, Security/audit, Definition of done. Accepted 2026-11-10
+Specs 002–005 use the short format (Goal / In scope / Out of scope / Requirements or Scenarios / Tests / Dependencies / Acceptance / Risks) plus three sections: Data changes, Security/audit, Definition of done. They are NOT converted to the full template in `specs/_template.md`. Why: spikes prove an unknown with mocks and manual checklists; the full template's business-rule and UI sections do not apply yet. Consequence: when a spike graduates to a feature spec (spec 001 uses 003/004), the feature spec uses the full template.
 
 ## Open questions
 - Launch markets, fiscal/tax rules, currencies, languages.

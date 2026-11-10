@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "machine": "Intel(R) Xeon(R) Platinum 8321HC CPU @ 1.40GHz / 7935 MiB RAM / linux",
+  "metrics": {
+    "3 keyset page (depth 10%) :: 200 rows by keyset": 0.415,
+    "1 barcode-lookup (cold) :: first lookup on a fresh connection": 4.536323,
+    "2 name-search (FTS5) :: prefix search, top 20": 0.118,
+    "2 hot-index build :: build sorted index of active SKUs": 6.163561,
+    "3 keyset page (depth 50%) :: 200 rows by keyset": 0.519,
+    "4 sale-commit (mirrored schema) :: 6-line sale, one transaction, synchronous=FULL": 41.055,
+    "5 sale-commit under load :: 6-line sale while sync writer + report run": 41.823,
+    "6 report (aggregates) :: 90-day sales from daily_sales_summary": 0.064762,
+    "9 memory :: runner peak RSS": 10.39453125,
+    "6 report (raw sale_line) :: same range scanned from raw lines (why aggregates exist)": 2144.380726,
+    "1 barcode-lookup (warm) :: single indexed lookup": 0.018,
+    "3 keyset page (depth 0) :: 200 rows by keyset": 0.217
+  }
+}

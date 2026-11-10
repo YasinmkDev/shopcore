@@ -70,6 +70,39 @@ jobs:
           just gen-types
           git diff --exit-code -- packages/protocol-ts/src/generated.ts
 
+  bench-smoke:
+    # Spec 002: 10k-row smoke run as a RELATIVE regression tripwire against
+    # the stored baseline (fails only on >2x regression). NOT an absolute
+    # budget check — the absolute budgets are gated by the manual full run
+    # on the target PC (05, amendment 2).
+    needs: check
+    runs-on: windows-latest
+    # ADR-022: same Strawberry Perl pin as the check job (vendored OpenSSL).
+    env:
+      OPENSSL_SRC_PERL: 'C:\Strawberry\perl\bin\perl.exe'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Put Strawberry Perl first on PATH
+        run: |
+          if (-not (Test-Path "C:\Strawberry\perl\bin\perl.exe")) { throw "Strawberry Perl not found at C:\Strawberry\perl\bin" }
+          Add-Content $env:GITHUB_PATH "C:\Strawberry\perl\bin"
+          perl -v | Select-Object -First 2
+
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+
+      - name: Install just 1.59.0
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.59.0
+
+      - name: Run bench smoke (10k rows, baseline tripwire)
+        run: just bench-smoke
+
   build-windows:
     # Builds the Windows .exe for testing. Runs only when `check` is green.
     # Added 2026-11-10 at the user's request; installer distribution is

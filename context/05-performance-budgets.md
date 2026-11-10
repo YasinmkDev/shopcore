@@ -1,6 +1,7 @@
 # 05 — Performance Budgets and Data-Handling Rules
 
-Budgets are requirements, enforced by `just bench` in CI on a seeded dataset (500k SKUs, 5M sale lines, background sync running). A change that regresses a budget does not merge. Numbers marked (initial) are calibrated in Phase 0 on the weakest target PC and then frozen in `08-decisions`.
+Budgets are requirements. A change that regresses a budget does not merge. Numbers marked (initial) are calibrated in Phase 0 on the weakest target PC and then frozen in `08-decisions`.
+The full dataset (500k SKUs, 5M sale lines, background sync running) is measured manually on the target PC — that run is the gate. CI runs `just bench` on a 10k-row smoke dataset as a RELATIVE regression tripwire, not an absolute budget check: it compares each metric against a stored baseline in `crates/bench/baseline/smoke-baseline.json` and fails only if any metric exceeds 5× its baseline value (generous tolerance — runners vary; 2× was tried 2026-11-10 and tripped on shared-runner noise alone). The baseline is refreshed deliberately (`just bench --update-baseline`) when the hardware or workload changes, never automatically. Dev-machine numbers are labelled PROVISIONAL in the results until the target-machine run supplies the real record.
 
 ## Budgets
 | Interaction | Budget |
@@ -17,7 +18,8 @@ Budgets are requirements, enforced by `just bench` in CI on a seeded dataset (50
 | Report over 2M raw rows (server) | < 3 s |
 | Total RAM, all processes, idle (initial) | < 400 MB |
 | Total RAM after 8 h simulated trading (initial) | no growth beyond +10% |
-| Installer size (initial) | < 60 MB |
+| Installer size, online bootstrapper (initial) | < 60 MB excl. WebView2 (ADR-016) |
+| Installer size, offline installer (initial) | ~150 MB, WebView2 bundled (ADR-016) |
 | Sync running in background | checkout latency unaffected (same budgets) |
 
 ## Data-handling rules (core)
@@ -43,7 +45,7 @@ Budgets are requirements, enforced by `just bench` in CI on a seeded dataset (50
 - Animate only `transform` and `opacity` (see `10-ui-system`). Adaptive animation tiers protect weak PCs.
 
 ## Measuring
-- `crates/bench`: seeds data (`just seed-large`) and runs the budgets above using criterion + scripted scenarios.
+- `crates/bench`: seeds data (`just seed-large`) and runs the budgets above with a scenario runner + hdrhistogram percentiles (median of 5 runs). Criterion is NOT used: it is a micro-benchmark harness, the wrong tool for end-to-end scenarios (spec 002 review, 2026-11-10).
 - UI: Playwright traces + `PerformanceObserver` long-task checks on the browser build against the hub HTTP transport; real-device run on the weakest PC before each release.
 - Every PR touching hot paths includes before/after numbers.
 - Release gate: 8-hour soak test (simulated sales + sync + prints) with memory and latency tracking.

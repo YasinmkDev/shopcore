@@ -11,11 +11,20 @@ Prove idempotent, resumable, scoped sync with chaos conditions, a fast first-syn
 - Till side (SQLite): `outbox` written in the same transaction as the source write; sync worker pushes batches (≤ 200 rows / ≤ 256 KB) with per-row idempotency keys; pull by per-stream cursor applied in short transactions (≤ 50 ms write-lock each).
 - Server side (`crates/server`, Axum + Postgres via CI service container): `POST /sync/push`, `GET /sync/pull?stream&cursor`, tenant_id + branch scoping, per-tenant monotonic sequence, idempotent apply.
 - Streams for the spike: `sale` + `sale_line` + `stock_movement` (push, append-only); `price_list_entry` (pull, per-field last-write-wins by server time).
-- **Revalidation stub:** server recomputes `sum(line totals) == sale total` using a minimal `domain::Money` with checked ops; mismatches flagged, never altered. (Full pricing/tax comes in Phase 1.)
+- **Revalidation stub:** server recomputes `sum(line totals) == sale total` using the real `crates/domain` (`Money` with checked ops) — the stub only checks line-total sums, it is not a copy of the domain logic. Mismatches flagged, never altered. (Full pricing/tax comes in Phase 1.)
 - **Snapshot:** server produces a compressed (zstd) SQLite snapshot of the branch's catalog (500k SKUs from spec 002), served with HTTP Range for resume, SHA-256 checksum verified on the till, then incremental pull continues from the snapshot's cursor.
 
 ## Out of scope
-Hub/LAN mode, auth beyond a static dev token, all other entities, UI.
+Hub/LAN mode, auth beyond a static dev token, all other entities, UI. (The dev token is a dev-only placeholder such as `dev-only`, never a real secret, and is replaced by real auth before Phase 5.)
+
+## Data changes
+Outbox / `sync_state` per `04-data-and-sync.md` (in the spike's till DB and the spike server DB); wire types (batch, ack, cursor, tombstone) in `crates/protocol`, versioned.
+
+## Security / audit
+Static dev token only (placeholder, see above). All server endpoints enforce tenant_id + branch scoping; no cross-tenant access.
+
+## Definition of done
+Standard checklist in `AGENTS.md` + all acceptance criteria above met; chaos tests green in CI.
 
 ## Chaos tests (must pass, automated)
 1. Duplicate delivery of the same batch → no duplicate rows.
@@ -32,7 +41,7 @@ Hub/LAN mode, auth beyond a static dev token, all other entities, UI.
 Measure rows/s for push and pull, snapshot size and download+apply time for 500k SKUs on LAN-like and throttled links, and checkout latency (spec 002 scenario 4) while sync runs. Sync must not move checkout p95 outside budget.
 
 ## Dependencies to propose
-`axum`, `tokio`, `sqlx` (Postgres), `zstd`, `sha2`, `reqwest`, `serde`. Justify each.
+`axum`, `tokio`, `sqlx` (Postgres), `zstd`, `sha2`, `reqwest`, `serde`. Justify each. Local runs use a docker-compose Postgres; if no Postgres is available the server tests skip with a clear message, never silently.
 
 ## Acceptance
 All chaos tests green in CI; numbers recorded in `08-decisions.md`; written assessment of ADR-009 with any protocol changes needed before Phase 5.
