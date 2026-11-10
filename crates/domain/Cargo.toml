@@ -8,6 +8,10 @@ publish = false
 description = "ShopCore domain: pure business logic (Money, Qty, pricing, tax, promotions, stock rules). No I/O, no clock, no randomness, no DB, no network."
 
 [dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

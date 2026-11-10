@@ -6,5 +6,11 @@
 //! Purity is an invariant (AGENTS.md): no I/O, no clock, no randomness, no
 //! database, no network. Time, randomness, and IDs are injected via traits
 //! defined here and implemented at the edges, so every rule is testable with
-//! deterministic inputs. Spec 000 leaves this crate empty; the types and
-//! rules land with the domain spec.
+//! deterministic inputs.
+//!
+//! Spec 005 lands the first real type: [`Money`] (checked i64 minor units).
+//! Pricing and tax are Phase 1, not this crate yet.
+
+pub mod money;
+
+pub use money::Money;
