@@ -1,7 +1,10 @@
 # Spec 001 — Checkout: scan → cart → cash sale → receipt
 
 Status: Draft (needs human approval before implementation)
-Phase: 1   Depends on: 000 (scaffold), Phase 0 (002, 003, 004, 005) — blocked until Phase 0 passes
+Phase: 1   Depends on: 000 (scaffold), 000b (Button/TextField + dark theme), 002 (benchmark harness), 005 (outbox)
+
+## Hardware rule (ADR-029 gate deferral)
+Hardware is used ONLY through the traits in `crates/hardware` (`ReceiptPrinter`, `BarcodeScanner`, `CashDrawer`) with mock drivers (`MockPrinter`, `MockScanner`) in this spec. Real devices plug in later via specs 003/004 with no change to the checkout code. The sale path never blocks on hardware: print failure queues a reprint, the sale completes.
 
 ## Goal
 A cashier scans items, sees the cart and total instantly, takes cash payment with change, and a receipt prints, entirely offline.

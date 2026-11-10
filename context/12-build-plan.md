@@ -2,13 +2,13 @@
 
 Ship thin slices. Do not build hub, cloud, or multi-tenant features before a real shop is trading on the embedded single-store version. Each phase has exit criteria; do not start the next phase until they pass.
 
-## Phase 0 — Foundations and spikes (gate for everything)
+## Phase 0 — Foundations and spikes (gate deferred, ADR-029)
 - Repo scaffold: Cargo workspace, pnpm workspace, `justfile`, CI, lint/format configs, toolchain pins, `just check` green on an empty app.
 - Tokens + `ui-kit` skeleton (tokens.css, Button, TextField, StatusPill) in white theme + dark theme.
 - Spikes (see `06`): receipt print (Latin + RTL, logo, QR) + cut + drawer kick; keyboard-wedge scanner discrimination; scale (if targeted).
 - Benchmark app: seed 500k SKUs / 5M sale lines; measure budgets on the weakest PC; fill the table in `08-decisions.md`.
 - Two-node sync spike (outbox → server → pull) with duplicate/out-of-order tests.
-- **Exit:** budgets met or fallback (Electron sidecar) decided via ADR; all hardware spikes pass.
+- **Status (2026-11-10, owner decision):** the Phase 0 benchmark gate is DEFERRED (ADR-029) — no weak-spec PC is available. Development continues (spec 000b, then spec 001); the full Windows benchmark (scenarios 7–8, 500k snapshot, checkout under sync) is a hard checkpoint before the real-shop pilot (Phase 4) at the latest. The benchmark tooling stays. The original exit criteria (budgets met or Electron fallback decided; all hardware spikes pass) still apply at that checkpoint.
 
 ## Phase 1 — Single-store POS (embedded, offline)
 Domain crate (Money/Qty/Rate, pricing, tax, discounts, promotions v1) with golden tests · DB schema + migrations + DB actor · catalog basics (items, SKUs, barcodes, categories, price list, tax groups) · sell screen (scan, cart, discounts, hold/recall, split payments, returns, void with approval) · receipt printing + reprint queue · users, roles, PIN, lock screen, manager override · shifts, cash in/out, Z-report · audit log · settings + setup wizard + training mode · local backup/restore.
@@ -19,7 +19,7 @@ Stock ledger + balances + verify job · adjustments, stocktake, low-stock alerts
 - **Exit:** an owner can load their catalog from the old system and run purchasing and stocktake; stock always reconciles.
 
 ## Phase 3 — Customers, credit, reporting
-Customer records, credit ledger, loyalty basics · aggregates + reports (sales, margin, stock valuation, item/category/cashier, tax) with Excel/PDF export · receipt/invoice designer · multi-language/RTL, multi-currency.
+Customer records, credit ledger, loyalty basics · aggregates + reports (sales, margin, stock valuation, item/category/cashier, tax) with Excel/PDF export · receipt/invoice designer · multi-language/RTL, multi-currency reporting + foreign-currency tender at the payment layer (ADR-017).
 - **Exit:** owner reports match golden totals; exports open correctly in Excel.
 
 ## Phase 4 — Pilot in one real shop (do not skip)
