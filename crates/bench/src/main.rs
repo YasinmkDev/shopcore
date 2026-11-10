@@ -136,11 +136,10 @@ fn free_space_bytes(path: &Path) -> Option<u64> {
     }
     #[cfg(target_os = "windows")]
     {
-        let drive = path
-            .components()
-            .next()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .unwrap_or_else(|| "C:".to_string());
+        let drive = path.components().next().map_or_else(
+            || "C:".to_string(),
+            |c| c.as_os_str().to_string_lossy().into_owned(),
+        );
         let output = std::process::Command::new("powershell")
             .args([
                 "-NoProfile",
