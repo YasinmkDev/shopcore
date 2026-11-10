@@ -35,6 +35,15 @@ allow = [
     "blessing",
 ]
 confidence-threshold = 0.8
+# Per-crate exception (approved 2026-11-10, NOT a global allow):
+# webpki-roots is Mozilla's root-certificate bundle, licensed
+# CDLA-Permissive-2.0 — a permissive *data* licence for the certificate
+# data, not a code licence. It is pulled in only by sqlx's `tls-rustls`
+# feature (the server's Postgres TLS). No other crate gets this licence.
+[[licenses.exceptions]]
+allow = ["CDLA-Permissive-2.0"]
+name = "webpki-roots"
+version = "1.0.11"
 
 [bans]
 multiple-versions = "warn"

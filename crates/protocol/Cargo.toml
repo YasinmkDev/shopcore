@@ -9,7 +9,9 @@ description = "ShopCore protocol: shared request/response/event types and the sy
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 ts-rs = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

@@ -62,7 +62,7 @@ New crates, all rustls (default features off where possible), no new OpenSSL:
 | Crate | Pinned | Features | Why |
 |---|---|---|---|
 | `axum` | 0.8.9 | default | HTTP server: routing for `POST /sync/push`, `GET /sync/pull`, snapshot download. |
-| `sqlx` | 0.9.0 | `postgres`, `runtime-tokio`, `tls-rustls`, `migrate` (default-features off) | Postgres driver for the server; rustls TLS (not native-tls/OpenSSL); migrations for the server schema. |
+| `sqlx` | 0.9.0 | `postgres`, `runtime-tokio`, `tls-rustls` (default-features off) | Postgres driver for the server; rustls TLS (not native-tls/OpenSSL). The `migrate`, `uuid`, and `json` features are deliberately NOT enabled: each pulls in `sqlx-sqlite`, whose `libsqlite3-sys` conflicts with rusqlite's (both link the native `sqlite3` library). Migrations run via `sqlx::raw_sql`; UUIDs are bound as text (Postgres casts text → uuid) and read back via `::text` casts; JSON payloads are bound as text (Postgres casts text → JSONB). |
 | `zstd` | 0.14.3 | default | Snapshot compression (500k-SKU SQLite file). |
 | `sha2` | 0.11.1 | default | SHA-256 checksum for the snapshot (till verifies before applying). |
 | `reqwest` | 0.13.5 | `rustls`, `json` (default-features off) | Till-side HTTP client: push/pull + snapshot download with Range resume. rustls, not native-tls. |

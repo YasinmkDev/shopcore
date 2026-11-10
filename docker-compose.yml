@@ -1,0 +1,27 @@
+# Spec 005 local Postgres (sync spike). The Linux `server-tests` CI job
+# uses the equivalent GitHub Actions `postgres` service container.
+# Data lives in a named volume and is never committed.
+# Start:  docker compose up -d postgres
+# Stop:   docker compose down   (add -v to wipe the data)
+# URL:    postgres://shopcore:shopcore@localhost:5432/shopcore
+
+services:
+  postgres:
+    image: postgres:16.4
+    container_name: shopcore-postgres
+    environment:
+      POSTGRES_USER: shopcore
+      POSTGRES_PASSWORD: shopcore
+      POSTGRES_DB: shopcore
+    ports:
+      - "5432:5432"
+    volumes:
+      - shopcore-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shopcore -d shopcore"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  shopcore-postgres-data:

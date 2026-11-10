@@ -10,6 +10,10 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub mod sync;
+
+pub use sync::{Cursor, OutboxRow, PriceListEntry, PullResponse, SyncAck, SyncBatch, Tombstone};
+
 /// Response to the `ping` command. Proves the UI → Rust round-trip.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct Pong {

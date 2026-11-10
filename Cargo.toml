@@ -9,6 +9,7 @@ members = [
     "crates/desktop/src-tauri",
     "crates/hub",
     "crates/server",
+    "crates/sync-client",
     "crates/bench",
 ]
 
@@ -23,7 +24,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
 tracing = "0.1.44"
-uuid = { version = "1.29.2", features = ["v7"] }
+uuid = { version = "1.29.2", features = ["v7", "serde"] }
 ts-rs = "12.0.1"
 rusqlite = { version = "0.41.1", features = ["bundled-sqlcipher-vendored-openssl"] }
 # Spec 002 (approved 2026-11-10, proof: `cargo info` + lockfile in the session
@@ -32,6 +33,24 @@ rusqlite = { version = "0.41.1", features = ["bundled-sqlcipher-vendored-openssl
 rand = "0.10.3"
 hdrhistogram = "7.6.0"
 tauri = "2.12.5"
+# Spec 005 (approved 2026-11-10, proof: `cargo info` + scratch lockfile +
+# `cargo deny` in the approval reply): axum + sqlx for the sync server,
+# zstd for snapshots, sha2 for snapshot checksums, reqwest for the
+# till-side sync client, tower-http for HTTP Range serving. All rustls
+# (default features off where possible), no new OpenSSL. Exact pins;
+# never bump as a side effect.
+axum = "0.8.9"
+sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls"] }
+zstd = "0.14.3"
+sha2 = "0.11.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }
+# tower-http pinned to 0.6.11 (not the latest 0.7.1) to match axum 0.8.9's
+# own tower-http — avoids two versions in the tree. Range support verified
+# in the 0.6.11 source (try_parse_range in services/fs).
+tower-http = { version = "0.6.11", features = ["fs"] }
+# tower (for ServiceExt::oneshot, used to delegate snapshot downloads to
+# tower-http ServeFile so Range is handled by tower-http, not by hand).
+tower = "0.5.3"
 shopcore-domain = { path = "crates/domain", version = "0.1.0" }
 shopcore-core = { path = "crates/core", version = "0.1.0" }
 shopcore-protocol = { path = "crates/protocol", version = "0.1.0" }

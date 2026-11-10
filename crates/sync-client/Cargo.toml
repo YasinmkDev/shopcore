@@ -1,0 +1,22 @@
+[package]
+name = "shopcore-sync-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "ShopCore sync client: till-side push/pull and snapshot download over HTTP. Separate crate so reqwest / aws-lc-rs never enter the shipped desktop binary (spec 005, amendment 2)."
+
+[dependencies]
+reqwest = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+shopcore-protocol = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

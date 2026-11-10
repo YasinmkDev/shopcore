@@ -199,3 +199,44 @@ jobs:
           path: |
             target/release/shopcore-bench.exe
             crates/bench/RUN.md
+
+  server-tests:
+    # Spec 005 (ADR-015, amended 2026-11-10): the server/Postgres chaos
+    # tests run on a Linux job with a Postgres service container. The
+    # till-side unit tests also run on the Windows `check` job. This job
+    # FAILS if Postgres is unavailable (amendment 5) — the chaos tests
+    # never skip silently; the env-flag skip is local-only.
+    needs: check
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.4
+        env:
+          POSTGRES_USER: shopcore
+          POSTGRES_PASSWORD: shopcore
+          POSTGRES_DB: shopcore_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://shopcore:shopcore@localhost:5432/shopcore_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+
+      - name: Install cargo-nextest 0.9.151
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.151
+
+      - name: Run sync chaos tests (Postgres required, no silent skip)
+        run: cargo nextest run -p shopcore-server --test chaos
