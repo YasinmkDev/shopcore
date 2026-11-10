@@ -59,7 +59,7 @@ fn run_command(program: &str, args: &[&str]) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
-/// Windows-only machine fields: disk type, Windows build, WebView2
+/// Windows-only machine fields: disk type, Windows build, `WebView2`
 /// version, active power plan. Each is `"unknown"` when its probe fails.
 #[cfg(target_os = "windows")]
 fn detect_windows_fields() -> (String, String, String, String) {
