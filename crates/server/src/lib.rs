@@ -52,12 +52,28 @@ pub struct ServerState {
 /// link the native `sqlite3` library). Instead the SQL is executed
 /// directly with `sqlx::raw_sql`, which is enough for the spike's single
 /// migration file.
+/// Run the server migrations (spec 005). Idempotent: every statement is
+/// `IF NOT EXISTS`.
 ///
 /// # Errors
 /// Returns `ServerError::Database` if the SQL fails.
+///
+/// Concurrency: nextest runs each chaos test in its own process, so an
+/// in-process `OnceLock` cannot serialize migrations — and on a fresh
+/// database the parallel `CREATE TABLE IF NOT EXISTS` calls race (two
+/// processes both pass the existence check, then both try to insert the
+/// table's type into `pg_type` and one dies with a unique violation).
+/// So the whole migration runs inside one transaction that first takes a
+/// transaction-scoped advisory lock; the second process blocks until the
+/// first commits, then sees the tables already exist.
 pub async fn run_migrations(pool: &PgPool) -> Result<(), ServerError> {
     let sql = include_str!("../migrations/001_sync_tables.sql");
-    sqlx::raw_sql(sql).execute(pool).await?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(727271)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::raw_sql(sql).execute(&mut *tx).await?;
+    tx.commit().await?;
     Ok(())
 }
 
