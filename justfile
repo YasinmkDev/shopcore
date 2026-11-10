@@ -33,7 +33,12 @@ check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo deny check
-    cargo nextest run --workspace
+    # The server chaos tests need a live Postgres (they fail loudly
+    # without one, per spec 005 amendment 5) and run only in the Linux
+    # `server-tests` CI job (ADR-015) and locally via
+    # `cargo nextest run -p shopcore-server --test chaos`. Exclude just
+    # that test binary here so future server unit tests still run.
+    cargo nextest run --workspace --filter-expr "not binary(chaos)"
     pnpm install --frozen-lockfile
     pnpm --filter @shopcore/ui run typecheck
     pnpm --filter @shopcore/ui-kit run typecheck
@@ -47,7 +52,9 @@ check:
 
 # Tests only (Rust + TypeScript).
 test:
-    cargo nextest run --workspace
+    # Same exclusion as `check`: the chaos tests need Postgres and run
+    # in the Linux `server-tests` CI job (ADR-015).
+    cargo nextest run --workspace --filter-expr "not binary(chaos)"
     pnpm --filter @shopcore/ui run test
     pnpm --filter @shopcore/ui-kit run test
 
