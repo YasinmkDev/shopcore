@@ -11,7 +11,7 @@ Hardware is the riskiest unknown. Prove each device in Phase 0 spikes before bui
 ## Traits (sketch; agent finalizes with an ADR)
 ```
 ReceiptPrinter   { print(doc: PrintDoc) -> Result, status() -> PrinterStatus, open_drawer() }
-BarcodeScanner   { events() -> Stream<ScanEvent> }
+BarcodeScanner   { events() -> tokio::sync::mpsc::Receiver<ScanEvent> }  // ADR-030: mpsc, not Stream — no futures/tokio-stream dep
 CashDrawer       { open() }                      // usually via printer kick pulse
 Scale            { read_weight() -> Result<Qty> } // stable-weight detection
 CustomerDisplay  { show(lines) }

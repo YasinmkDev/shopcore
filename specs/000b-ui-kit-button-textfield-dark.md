@@ -1,6 +1,6 @@
 # Spec 000b — ui-kit: Button, TextField + dark-theme wiring
 
-Status: Draft (needs human approval before implementation)
+Status: Approved (with the changes below, 2026-11-10)
 Phase: 0   Depends on: 000 (scaffold)
 
 ## Goal
@@ -8,20 +8,23 @@ Finish the Phase 0 ui-kit skeleton: typed `Button` and `TextField` registry
 components in white and dark themes, with the theme switch actually wired up.
 
 ## Users and scenario
-A developer building the sell screen (spec 001) imports `Button` and
+A developer building the sell screen (spec 001c) imports `Button` and
 `TextField` from `@shopcore/ui-kit` instead of writing raw elements, and a
 cashier on a dark shop floor can switch the app to the dark theme.
 
 ## In scope / Out of scope
 In: `Button` (primary/secondary/ghost/danger; sm/md/lg; loading; icon-only
 via `IconButton`), `TextField` (label, helper, inline error, disabled,
-required), theme setting Light/Dark/Auto with persistence, Inter bundled
-locally, a dev-only test page showing every variant/state in both themes,
-migrating the scaffold Shell's raw Ping `<button>` to `Button`.
+required), theme setting Light/Dark/Auto with persistence behind a
+`SettingsStore` interface, `useMotionTier` hook (tiers 0–2), Inter bundled
+locally (Latin subsets only), `--border-input` token, a dev-only test page
+showing every variant/state in both themes, migrating the scaffold Shell's
+raw Ping `<button>` to `Button`.
 Out: `NumberField`/`MoneyField`/`QtyField` (build on `TextField`, later
 specs), `Switch` (the theme control in the Shell is a plain select/buttons
-demo, not the registry `Switch`), High contrast variant, density-mode
-switching, `useMotionTier` hook, any core/Rust change, any DB change.
+demo, not the registry `Switch`), High contrast variant (out, separate
+spec), density-mode switching (deferred to the AppShell spec), any core/Rust
+change, any DB change.
 
 ## Functional requirements (numbered, testable)
 1. `Button` renders primary/secondary/ghost/danger in sm/md/lg, with
@@ -37,35 +40,62 @@ switching, `useMotionTier` hook, any core/Rust change, any DB change.
    disabled and error states; error text sits inline next to the field in
    plain language, with `aria-invalid` + `aria-describedby`.
 5. `TextField` has a visible 2 px focus ring + offset (token
-   `--focus-ring`) in both themes; focus is never removed via CSS.
+   `--focus-ring`) in both themes; focus is never removed via CSS. The
+   focus ring colour is ≥ 3:1 against the surface in both themes (tested,
+   see Tests).
 6. Theme: `apps/ui` gains a theme provider/hook with setting Light
    (default) / Dark / Auto (follows OS via `matchMedia`
    `prefers-color-scheme`); it sets `data-theme` on the app root, so the
    dark block already in `tokens.css` takes effect. No component reads the
    OS setting on its own.
-7. Theme choice persists per terminal in `localStorage` key
-   `shopcore.theme` (proposed — see Q1; no DB/settings-store change).
-8. The scaffold Shell migrates its raw Ping `<button>` to `Button`
+7. Theme choice persists per terminal behind a small `SettingsStore`
+   interface (read/write `theme`); the 000b implementation is backed by
+   `localStorage` key `shopcore.theme`. Moving to the core settings store
+   later is a one-file change (swap the backing store, not the call sites).
+8. `data-theme` is set synchronously before the first React render (no
+   flash of the wrong theme): a tiny inline script in `index.html` (or the
+   equivalent entry point) reads the stored setting and sets the attribute
+   before React mounts.
+9. The scaffold Shell migrates its raw Ping `<button>` to `Button`
    (primary, loading state while pinging) and gains a Light/Dark/Auto
    control built from the new components, proving the wiring end to end.
-9. Inter variable font is bundled locally (see Dependencies): `font-family`
-   becomes Inter first, system stack as fallback; no font is fetched from
-   the network (offline-first). Tabular numerals stay on for money/qty.
-10. Every component uses tokens only (Tailwind utilities mapped from
+10. Inter variable font is bundled locally (see Dependencies): `font-family`
+    becomes Inter first, system stack as fallback; no font is fetched from
+    the network (offline-first). Latin subsets only. The OFL license text
+    ships with the bundle. Tabular numerals stay on for money/qty.
+11. Every component uses tokens only (Tailwind utilities mapped from
     `tokens.css`); no raw hex, no one-off styles. All user-visible strings
-    in the Shell/test page come from i18n keys; component labels come from
-    props (no hardcoded strings inside components).
-11. Both components render correctly with `dir="rtl"` (logical properties
+    in the Shell/test page come from i18n keys (`t()` from
+    `@shopcore/i18n` — confirmed to exist, see Dependencies); component
+    labels come from props (no hardcoded strings inside components).
+12. Both components render correctly with `dir="rtl"` (logical properties
     only) and at 150% text scaling without breaking layout.
-12. A dev-only test page in `apps/ui` (not in shipped navigation) shows
+13. A dev-only test page in `apps/ui` (not in shipped navigation) shows
     every Button/TextField variant and state in both themes — the
     "Storybook-style test page" required by `10-ui-system.md`.
+14. `--border-input` token: a border colour ≥ 3:1 against the surface in
+    both themes, used for text-input borders (replacing the decorative
+    `--border` on inputs). The exact value is chosen by the implementer;
+    the test proves the ratio.
+15. `useMotionTier` hook (per `10-ui-system.md` adaptive tiers): tiers
+    0 (full, p95 frame ≤ 20 ms), 1 (reduced, p95 > 20 ms — no
+    layout/shared-element animations or springs; fades/slides kept),
+    2 (minimal, p95 > 33 ms — opacity-only, ≤ 100 ms). OS
+    `prefers-reduced-motion` forces tier 2. The hook sets a `data-motion`
+    attribute (`full` / `reduced` / `minimal`) on the app root. A basic
+    rAF frame-time sampler measures p95 over the first 60 frames after
+    startup and during the first transitions. User override
+    (Full / Reduced / Off) lives in Settings → Appearance → Motion and is
+    stored per terminal behind the same `SettingsStore` interface. No
+    component decides the tier on its own. Spec 001c's payment panel
+    needs this hook.
 
 ## Business rules touched (link to `context/02-domain-model.md` sections)
 None. No money, pricing, tax, stock or sale rule is involved.
 
 ## Data changes (tables/columns/migrations/indexes; sync impact)
-None. No migration. Theme preference lives in `localStorage` only.
+None. No migration. Theme and motion preferences live behind
+`SettingsStore` (localStorage-backed in 000b) only.
 
 ## Core/API changes (commands, events, errors with codes, permissions)
 None. No new Tauri command, no new IPC surface, `just gen-types` output
@@ -76,16 +106,20 @@ Components: `Button`, `IconButton`, `TextField` in `packages/ui-kit/src/`,
 exported from `packages/ui-kit/src/index.ts`. States per requirement 1/4,
 plus loading (Button) and error (TextField). Keyboard: native button/input
 behaviour — Enter/Space activates, Tab order sane, focus-visible ring.
-Motion: requirement 2 only; the full `useMotionTier` hook and tier
-measurement land with the first panel/drawer spec (see Q3).
+Motion: requirement 2 (Button press) plus the `useMotionTier` hook
+(requirement 15); the hook is in `packages/ui-kit` and consumed by
+`apps/ui`. The sell-screen motion exceptions in `10-ui-system.md` are
+gated on the tier (tier 2 = opacity-only).
 
 ## Performance (which budgets apply; expected numbers)
 No hot-path code. Sell-screen JS budget (< 300 kB gzip) unaffected — the
-font is a static asset, not JS; report the shipped woff2 size in the
-session summary. No long tasks; press animation is transform-only.
+font is a static asset, not JS; report the shipped woff2 sizes (per
+subset) in the session summary. The rAF sampler is cheap (60 frames,
+then idle); no long tasks; press animation is transform-only.
 
 ## Security / audit (permissions, audit events)
-None. Theme choice is a local display preference, not a sensitive action.
+None. Theme and motion choices are local display preferences, not
+sensitive actions.
 
 ## Tests (list exactly what will be added: unit, property, integration, e2e, golden)
 - Vitest component tests in `packages/ui-kit`: every Button variant/size/
@@ -95,11 +129,22 @@ None. Theme choice is a local display preference, not a sensitive action.
   `aria-label`.
 - Vitest tests in `apps/ui`: theme provider sets `data-theme="light"` /
   `"dark"` for Light/Dark, follows `matchMedia` for Auto, persists the
-  choice to `localStorage` and restores it on load; Shell Ping still works
-  through the new `Button` (existing Shell tests keep passing).
+  choice via `SettingsStore` and restores it on load; `data-theme` is set
+  before first render (no-flash test); Shell Ping still works through the
+  new `Button` (existing Shell tests keep passing).
+- `useMotionTier` unit tests: tier 0 at p95 ≤ 20 ms, tier 1 at p95 > 20 ms,
+  tier 2 at p95 > 33 ms, `prefers-reduced-motion` forces tier 2, user
+  override (Full/Reduced/Off) wins over the sampler, `data-motion`
+  attribute set on the root.
 - RTL render test (`dir="rtl"`) for both components.
-- AA contrast checks for text/accent/semantic colour pairs in both themes
-  (computed from the token values, not eyeballed).
+- AA contrast checks computed from the token values (not eyeballed),
+  covering EVERY text/background pair in both themes: text, text-muted,
+  text-faint (placeholders only), text-on-accent, accent and accent-subtle
+  (text on accent-subtle and accent-subtle as a background), and semantic
+  text on its tint background (success/warning/danger/info on
+  success-bg/warning-bg/danger-bg/info-bg). `--border-input` ≥ 3:1
+  against the surface in both themes; focus ring ≥ 3:1 against the
+  surface in both themes.
 - `just check` green (fmt, clippy, deny, nextest, tsc, eslint, vitest).
 - Manual click-through on Windows (still open from spec 000): Ping via the
   new `Button`, plus theme toggle Light → Dark → Auto.
@@ -119,20 +164,23 @@ None. Theme choice is a local display preference, not a sensitive action.
   inline next to the field and the input carries `aria-invalid`.
 - Given the app offline, when it loads, then Inter renders from the local
   bundle with no network font request.
+- Given `prefers-reduced-motion` on, when the app loads, then
+  `data-motion="minimal"` is set and animations are opacity-only.
+- Given a TextField, when it renders, then its border is the
+  `--border-input` token at ≥ 3:1 against the surface.
 
 ## Risks / open questions
-- Q1: Theme persistence — `localStorage` per terminal for now, migrated to
-  the core settings store when that spec lands? (Proposed: yes.)
-- Q2: High contrast variant (`10-ui-system.md` mentions it) — in or out of
-  000b? (Proposed: out, separate spec.)
-- Q3: `useMotionTier` hook — build it now, or defer to the first
-  panel/drawer spec and gate 000b motion on `prefers-reduced-motion` only?
-  (Proposed: defer; 000b motion is one 80 ms transform.)
-- Q4: Approve `@fontsource-variable/inter` 5.3.0 (verified on npm
-  2026-11-09) as the local Inter source?
-- Q5: Confirm sm Button (< 44 px) is back-office only.
-- Q6: Density-mode switching (Comfortable/Compact) — deferred to the
-  AppShell spec? (Proposed: yes; sm/md/lg are fixed sizes here.)
+- Q1: RESOLVED (approved 2026-11-10) — `SettingsStore` interface backed by
+  `localStorage` in 000b; core settings store later is a one-file change.
+- Q2: RESOLVED (approved 2026-11-10) — high contrast out, separate spec.
+- Q3: RESOLVED (approved 2026-11-10, reversed) — `useMotionTier` IS in
+  000b (requirement 15); spec 001c's payment panel needs it.
+- Q4: RESOLVED (approved 2026-11-10) — `@fontsource-variable/inter`
+  5.3.0, Latin subsets only, OFL text ships, woff2 sizes reported. If
+  5.3.0 does not resolve, STOP and ask; do not substitute a version.
+- Q5: RESOLVED (approved 2026-11-10) — sm Button is back-office only.
+- Q6: RESOLVED (approved 2026-11-10) — density-mode switching deferred to
+  the AppShell spec.
 
 ## Definition of done
 Standard checklist in `AGENTS.md` + anything specific here: tests added
@@ -143,8 +191,11 @@ decisions updated, session summary in the standard format.
 ## Dependencies proposed for approval
 | Dependency | Version | Why |
 |---|---|---|
-| `@fontsource-variable/inter` | 5.3.0 | Bundles the Inter variable font locally (offline-first); `10-ui-system.md` requires Inter bundled locally, and `apps/ui/src/index.css` already notes it "lands with spec 000b" |
-No other new dependency. No Radix primitive exists for Button/TextField
-(ADR-010's Radix line covers overlay primitives for later components), no
-new Rust crate. If 5.3.0 fails to resolve at install, use the nearest
-stable version, report which one and why, and change nothing else.
+| `@fontsource-variable/inter` | 5.3.0 | Bundles the Inter variable font locally (offline-first); `10-ui-system.md` requires Inter bundled locally, and `apps/ui/src/index.css` already notes it "lands with spec 000b". Latin subsets only; OFL text ships. |
+No other new dependency. `t()` and the `@shopcore/i18n` package are
+CONFIRMED to exist (`packages/i18n/src/index.ts` exports `t(key, locale)`,
+already imported by `apps/ui/src/features/shell/Shell.tsx`) — no scaffold
+needed. No Radix primitive exists for Button/TextField (ADR-010's Radix
+line covers overlay primitives for later components), no new Rust crate.
+If 5.3.0 fails to resolve at install, STOP and ask; do not substitute a
+version.
