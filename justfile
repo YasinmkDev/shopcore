@@ -61,9 +61,10 @@ bench:
 
 # CI smoke: seeds the 10k-row dataset, runs the scenarios, compares against
 # the stored baseline (relative tripwire: fails only on >2x regression).
-# Not an absolute budget check (05, amendment 2).
+# Not an absolute budget check (05, amendment 2). --fresh: CI always
+# starts from a clean database, never resumes a stale one.
 bench-smoke:
-    cargo run --release -p shopcore-bench -- seed --size smoke --db target/bench/bench-smoke.db
+    cargo run --release -p shopcore-bench -- seed --size smoke --db target/bench/bench-smoke.db --fresh
     cargo run --release -p shopcore-bench -- run --size smoke --db target/bench/bench-smoke.db --out target/bench/smoke-results
 
 # Refresh the stored CI smoke baseline deliberately (never automatic).
@@ -80,9 +81,20 @@ migrate:
     echo no migrations yet
 
 # Seed 500k SKUs / 5M sale lines for benchmarking (spec 002).
+# Resumes an interrupted seed by default; pass --fresh to start over.
 seed-large:
     cargo run --release -p shopcore-bench -- seed --size full --db target/bench/bench.db
 
 # Seed the 10k-row CI smoke dataset (spec 002).
+# Resumes an interrupted seed by default; pass --fresh to start over.
 seed-smoke:
     cargo run --release -p shopcore-bench -- seed --size smoke --db target/bench/bench-smoke.db
+
+# Prove a seeded database: checksum + per-SKU balance == sum(movements).
+bench-verify:
+    cargo run --release -p shopcore-bench -- verify --db target/bench/bench.db
+
+# Build the standalone bench exe (release) for the Windows target-PC run.
+# CI uploads it as the `shopcore-bench-windows` artifact with RUN.md.
+bench-exe:
+    cargo build --release -p shopcore-bench

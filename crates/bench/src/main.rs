@@ -1,17 +1,23 @@
 //! `shopcore-bench` CLI: `seed` builds the dataset, `run` measures the
-//! scenarios and writes `results.json` + `results.md`.
+//! scenarios and writes `results.json` + `results.md`, `verify` proves
+//! a seeded database (checksum + per-SKU balance check).
 //!
 //! Usage:
-//!   shopcore-bench seed --size <full|smoke|tiny> --db <path> [--seed <u64>]
+//!   shopcore-bench seed --size <full|smoke|tiny> --db <path> [--seed <u64>] [--fresh]
+//!     (resumes an interrupted seed by default; --fresh deletes and starts over)
 //!   shopcore-bench run --db <path> --size <full|smoke> [--ui-results <path>]
 //!     [--out <dir>] [--update-baseline] [--baseline <path>]
 //!     [--artifacts-dir <dir>] [--target-pc]
+//!   shopcore-bench verify --db <path>
+//!   shopcore-bench merge-ui --results-dir <dir> --ui-results <path>
+//!     (adds the debug-route UI results, scenarios 7-8, to an existing
+//!      results.json / results.md; run the debug route in the app first)
 //!
 //! Exit codes: 0 = pass, 1 = usage/bench error, 2 = baseline regression.
 
 use std::path::{Path, PathBuf};
 
-use shopcore_bench::report::{Baseline, MachineRecord, Results};
+use shopcore_bench::report::{Baseline, MachineRecord, Results, ScenarioResult};
 use shopcore_bench::scenarios;
 use shopcore_bench::{BenchError, schema, seed};
 
@@ -101,6 +107,58 @@ fn dataset_size(name: &str) -> Result<seed::DatasetSize, BenchError> {
     }
 }
 
+/// Estimated disk space a seed needs (database + WAL + headroom).
+/// Measured 2026-11-10: full = 2.3 GB database, smoke = 42 MB.
+fn required_bytes(size: &seed::DatasetSize) -> u64 {
+    if size.skus >= 500_000 {
+        4_000_000_000 // ~4 GB: 2.3 GB database + WAL + headroom
+    } else if size.skus >= 10_000 {
+        200_000_000 // ~200 MB
+    } else {
+        20_000_000 // ~20 MB
+    }
+}
+
+/// Free disk space (bytes) on the filesystem holding `path`, or `None`
+/// if it cannot be determined. Linux: `df`. Windows: PowerShell
+/// `Get-PSDrive` on the path's drive letter.
+fn free_space_bytes(path: &Path) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let dir = path.parent().map_or(".", |p| p.to_str().unwrap_or("."));
+        let output = std::process::Command::new("df")
+            .args(["-k", "--output=avail", dir])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let kb: u64 = text.lines().nth(1)?.trim().parse().ok()?;
+        Some(kb * 1024)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let drive = path
+            .components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .unwrap_or_else(|| "C:".to_string());
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!("(Get-PSDrive {drive}).Free"),
+            ])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        text.parse::<u64>().ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 fn cmd_seed(args: &Args) -> Result<(), BenchError> {
     let size = dataset_size(args.get("size").unwrap_or("full"))?;
     let db = args
@@ -113,8 +171,44 @@ fn cmd_seed(args: &Args) -> Result<(), BenchError> {
     if let Some(parent) = db.parent() {
         std::fs::create_dir_all(parent).map_err(BenchError::Io)?;
     }
-    if db.exists() {
+    // Free disk space: print what the seed needs and refuse to start
+    // if there is not enough room (a seed that runs out of disk
+    // mid-way leaves a corrupt partial database).
+    let need = required_bytes(&size);
+    println!(
+        "seed needs ~{} MB free disk space for {}",
+        need / 1_000_000,
+        db.display()
+    );
+    match free_space_bytes(&db) {
+        Some(free) => {
+            println!("free disk space: {} MB", free / 1_000_000);
+            if free < need {
+                return Err(BenchError::Usage(format!(
+                    "not enough free disk space: need ~{} MB, have {} MB",
+                    need / 1_000_000,
+                    free / 1_000_000
+                )));
+            }
+        }
+        None => println!("free disk space: unknown (could not determine)"),
+    }
+    // Resume by default: if the database already exists, the seeder
+    // continues from the last committed batch instead of starting
+    // over. `--fresh` deletes it and seeds from scratch.
+    let fresh = args.has("fresh");
+    if db.exists() && fresh {
+        // Delete the WAL sidecar files too: a stale -wal from a killed
+        // run must not survive next to a fresh database file.
         std::fs::remove_file(&db).map_err(BenchError::Io)?;
+        let wal = PathBuf::from(format!("{}-wal", db.display()));
+        if wal.exists() {
+            std::fs::remove_file(&wal).map_err(BenchError::Io)?;
+        }
+        let shm = PathBuf::from(format!("{}-shm", db.display()));
+        if shm.exists() {
+            std::fs::remove_file(&shm).map_err(BenchError::Io)?;
+        }
     }
     let mut conn = rusqlite::Connection::open(&db).map_err(BenchError::Sql)?;
     schema::create_schema(&conn)?;
@@ -132,7 +226,102 @@ fn cmd_seed(args: &Args) -> Result<(), BenchError> {
         stats.elapsed_ms,
         db_bytes
     );
+    // Deterministic checksum of the dataset (counts + sums). A fresh
+    // seed with the same seed value must print the same string; the
+    // smoke checksum is recorded in the `smoke_seed_checksum` test.
+    let sum = seed::checksum(&conn)?;
+    println!("checksum: {sum}");
     Ok(())
+}
+
+/// Verify a seeded database: print the checksum, check sale totals
+/// equal line totals, and check every per-SKU balance equals the sum
+/// of that SKU's movements. Exit 0 only if every check passes.
+fn cmd_verify(args: &Args) -> Result<i32, BenchError> {
+    let db = args
+        .get("db")
+        .map_or_else(|| PathBuf::from("target/bench/bench.db"), PathBuf::from);
+    if !db.exists() {
+        return Err(BenchError::Usage(format!(
+            "database {} does not exist — run `just seed-large` first",
+            db.display()
+        )));
+    }
+    let conn = scenarios::open_db(&db)?;
+    let report = seed::verify(&conn)?;
+    println!("checksum: {}", report.checksum);
+    println!("sale_sum == line_sum: {}", report.sale_line_sums_match);
+    println!(
+        "balance mismatches (per-SKU balance != sum of movements): {}",
+        report.balance_mismatches
+    );
+    println!(
+        "movements without a balance row: {}",
+        report.movements_without_balance
+    );
+    if report.sale_line_sums_match
+        && report.balance_mismatches == 0
+        && report.movements_without_balance == 0
+    {
+        println!("verify: OK");
+        Ok(0)
+    } else {
+        eprintln!("verify: FAILED — see the counts above");
+        Ok(1)
+    }
+}
+
+/// Merge debug-route UI results (scenarios 7-8) into an existing
+/// `results.json` / `results.md` pair, produced by a `run` without
+/// `--ui-results`. The UI file is the `shopcore-ui-results.json` the
+/// debug route (Ctrl+Shift+B) writes to the OS temp folder.
+fn cmd_merge_ui(args: &Args) -> Result<i32, BenchError> {
+    let results_dir = args
+        .get("results-dir")
+        .map_or_else(|| PathBuf::from("target/bench/results"), PathBuf::from);
+    let ui_path = args.get("ui-results").map_or_else(
+        || {
+            Err(BenchError::Usage(
+                "merge-ui needs --ui-results <path to shopcore-ui-results.json>".to_string(),
+            ))
+        },
+        |p| Ok(PathBuf::from(p)),
+    )?;
+    let ui = scenarios::load_ui_results(&ui_path)?;
+    let json_path = results_dir.join("results.json");
+    let mut run = Results::load(&json_path)?;
+    let mut merged: Vec<ScenarioResult> = Vec::with_capacity(run.scenarios.len());
+    let mut ui_inserted = false;
+    for scenario in std::mem::take(&mut run.scenarios) {
+        if scenario.name == "7 startup" {
+            merged.push(scenarios::scenario_startup(Some(&ui)));
+        } else if scenario.name.starts_with("8 UI") {
+            if !ui_inserted {
+                merged.extend(scenarios::scenario_ui(Some(&ui)));
+                ui_inserted = true;
+            }
+            // Drop the old (unmeasured or stale) "8 UI ..." rows.
+        } else {
+            merged.push(scenario);
+        }
+    }
+    if !ui_inserted {
+        // No UI rows existed at all (older results file): append them.
+        merged.push(scenarios::scenario_startup(Some(&ui)));
+        merged.extend(scenarios::scenario_ui(Some(&ui)));
+    }
+    run.scenarios = merged;
+    let md_path = results_dir.join("results.md");
+    std::fs::write(&json_path, run.to_json()?).map_err(BenchError::Io)?;
+    std::fs::write(&md_path, run.to_markdown()).map_err(BenchError::Io)?;
+    println!(
+        "merged UI results (startup {:.0} ms, scroll p95 {:.2} ms, {} long tasks) into {}",
+        ui.startup_ms,
+        ui.scroll_p95_ms,
+        ui.long_tasks,
+        json_path.display()
+    );
+    Ok(0)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -241,8 +430,22 @@ fn main() -> std::process::ExitCode {
                 std::process::ExitCode::from(1)
             }
         },
+        "verify" => match cmd_verify(&args) {
+            Ok(code) => std::process::ExitCode::from(u8::try_from(code).unwrap_or(1)),
+            Err(err) => {
+                eprintln!("error: {err}");
+                std::process::ExitCode::from(1)
+            }
+        },
+        "merge-ui" => match cmd_merge_ui(&args) {
+            Ok(code) => std::process::ExitCode::from(u8::try_from(code).unwrap_or(1)),
+            Err(err) => {
+                eprintln!("error: {err}");
+                std::process::ExitCode::from(1)
+            }
+        },
         other => {
-            eprintln!("unknown command {other:?} (want seed|run)");
+            eprintln!("unknown command {other:?} (want seed|run|verify|merge-ui)");
             std::process::ExitCode::from(1)
         }
     }

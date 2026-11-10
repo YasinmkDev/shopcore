@@ -168,8 +168,78 @@ fn sku_name(rng: &mut StdRng, i: u64) -> String {
     format!("{word} {size}")
 }
 
+/// How many rows per transaction while seeding (also the resume
+/// granularity: a killed run leaves whole batches committed, so a
+/// resume never has to redo a partial batch).
+const SEED_BATCH: u64 = 10_000;
+
+fn existing_count(conn: &Connection, table: &str) -> Result<u64, BenchError> {
+    let n: i64 = conn
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .map_err(BenchError::Sql)?;
+    Ok(u64::try_from(n).unwrap_or(0))
+}
+
+/// One generated sale: RNG draws only, no DB. Extracted so a resume can
+/// replay the draws for already-seeded sales (keeping the RNG stream
+/// aligned) without inserting them.
+struct GeneratedLine {
+    sku_i: u64,
+    qty_milli: i64,
+    unit_price_e4: i64,
+    tax: i64,
+    line_total: i64,
+}
+
+struct GeneratedSale {
+    completed_at: i64,
+    day: String,
+    customer: String,
+    lines: Vec<GeneratedLine>,
+    total_minor: i64,
+}
+
+fn generate_sale(rng: &mut StdRng, size: &DatasetSize) -> GeneratedSale {
+    let day_offset = i64::from(rng.random_range(0..90));
+    let completed_at = NOW_MS - day_offset * DAY_MS;
+    let day = format!("day-{}", 90 - day_offset);
+    let customer = format!("cust-{}", rng.random_range(0..size.customers));
+    let line_count = rng.random_range(1..=8);
+    let mut lines = Vec::new();
+    let mut total_minor: i64 = 0;
+    for _ in 0..line_count {
+        let sku_i = rng.random_range(0..size.skus);
+        let qty_milli: i64 = i64::from(rng.random_range(1..=5) * 1000);
+        let unit_price_e4: i64 = i64::from(rng.random_range(50..=50_000));
+        let line_total = qty_milli * unit_price_e4 / 10_000;
+        let tax = line_total * 18 / 118;
+        total_minor += line_total;
+        lines.push(GeneratedLine {
+            sku_i,
+            qty_milli,
+            unit_price_e4,
+            tax,
+            line_total,
+        });
+    }
+    GeneratedSale {
+        completed_at,
+        day,
+        customer,
+        lines,
+        total_minor,
+    }
+}
+
 /// Seed `conn` with `size` rows from `seed_value`.
 ///
+/// Resumable: if `conn` already holds a partially seeded dataset (same
+/// seed value), the phases that are already complete are skipped and
+/// the sales phase continues from the last committed batch. The RNG
+/// stream is replayed for skipped rows, so a resumed seed produces
+/// the identical dataset a fresh seed would (same checksum).
 /// Seeding runs with `synchronous=NORMAL` for speed; the scenarios run
 /// with `synchronous=FULL` (the app's setting), so measurements are honest.
 ///
@@ -188,95 +258,164 @@ pub fn seed(
         .map_err(BenchError::Sql)?;
     let mut stats = SeedStats::default();
 
-    // SKUs + FTS rows.
+    // Existing counts: what a previous (interrupted) seed already wrote.
+    // Row IDs are sequential (sku-0.., barcode-0.., sale-0..), and every
+    // phase commits in whole batches, so the count is the resume point.
+    let have_skus = existing_count(conn, "sku")?.min(size.skus);
+    let have_barcodes = existing_count(conn, "barcode")?.min(size.barcodes);
+    let have_customers = existing_count(conn, "customer")?.min(size.customers);
+    let have_sales = existing_count(conn, "sale")?.min(size.sales);
+    let have_lines = existing_count(conn, "sale_line")?;
+    let have_movements = existing_count(conn, "stock_movement")?;
+    // Sales batches are single transactions, so the sale count must sit
+    // on a batch boundary; a partial batch means the database was
+    // modified outside the seeder. Fail loudly instead of silently
+    // producing a wrong dataset (re-seed with --fresh).
+    if have_sales % SEED_BATCH != 0 && have_sales != size.sales {
+        return Err(BenchError::Usage(format!(
+            "sale count {have_sales} is not a batch multiple of {SEED_BATCH} — \
+             the database was modified outside the seeder; re-seed with --fresh"
+        )));
+    }
+    let resumed = have_skus > 0 || have_barcodes > 0 || have_customers > 0 || have_sales > 0;
+    if resumed {
+        println!(
+            "resuming seed: {have_skus} skus, {have_barcodes} barcodes, \
+             {have_customers} customers, {have_sales} sales already present"
+        );
+    }
+
+    // SKUs + FTS rows, in batches. sku_name consumes one RNG draw per
+    // SKU, so it is called for every index — replaying the draw for
+    // skipped rows keeps the stream aligned.
     {
-        let tx = conn.transaction().map_err(BenchError::Sql)?;
-        {
-            let mut sku = tx
-                .prepare(
-                    "INSERT INTO sku (id, tenant_id, code, name, base_uom_id, \
-                     tax_group_id, track_batch, active, created_at, updated_at, version) \
-                     VALUES (?1, ?2, ?3, ?4, 'each', 'std', 0, ?5, 0, 0, 1)",
-                )
-                .map_err(BenchError::Sql)?;
-            let mut fts = tx
-                .prepare("INSERT INTO sku_fts (name, code) VALUES (?1, ?2)")
-                .map_err(BenchError::Sql)?;
-            for i in 0..size.skus {
-                let name = sku_name(&mut rng, i);
-                let code = format!("SKU-{i:06}");
-                let active = i < size.active_skus;
-                sku.execute(params![format!("sku-{i}"), TENANT, code, name, active])
+        let mut i = 0u64;
+        while i < size.skus {
+            let end = (i + SEED_BATCH).min(size.skus);
+            let tx = conn.transaction().map_err(BenchError::Sql)?;
+            {
+                let mut sku = tx
+                    .prepare(
+                        "INSERT INTO sku (id, tenant_id, code, name, base_uom_id, \
+                         tax_group_id, track_batch, active, created_at, updated_at, version) \
+                         VALUES (?1, ?2, ?3, ?4, 'each', 'std', 0, ?5, 0, 0, 1)",
+                    )
                     .map_err(BenchError::Sql)?;
-                fts.execute(params![name, code]).map_err(BenchError::Sql)?;
+                let mut fts = tx
+                    .prepare("INSERT INTO sku_fts (name, code) VALUES (?1, ?2)")
+                    .map_err(BenchError::Sql)?;
+                for j in i..end {
+                    let name = sku_name(&mut rng, j);
+                    if j < have_skus {
+                        continue;
+                    }
+                    let code = format!("SKU-{j:06}");
+                    let active = j < size.active_skus;
+                    sku.execute(params![format!("sku-{j}"), TENANT, code, name, active])
+                        .map_err(BenchError::Sql)?;
+                    fts.execute(params![name, code]).map_err(BenchError::Sql)?;
+                }
             }
+            tx.commit().map_err(BenchError::Sql)?;
+            i = end;
         }
-        tx.commit().map_err(BenchError::Sql)?;
         stats.skus = size.skus;
     }
 
     // Barcodes (1.2 per SKU on average: every SKU gets one, every 5th a second).
+    // Deterministic by index (no RNG), so skipping by count is exact.
     {
-        let tx = conn.transaction().map_err(BenchError::Sql)?;
-        {
-            let mut ins = tx
-                .prepare(
-                    "INSERT INTO barcode (id, tenant_id, sku_id, code, is_primary, \
-                     pack_qty_milli, created_at, updated_at, version) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, 1000, 0, 0, 1)",
-                )
-                .map_err(BenchError::Sql)?;
-            let mut made: u64 = 0;
-            let mut i: u64 = 0;
-            while made < size.barcodes {
-                let sku_i = i % size.skus;
-                let primary = made == sku_i;
-                ins.execute(params![
-                    format!("barcode-{made}"),
-                    TENANT,
-                    format!("sku-{sku_i}"),
-                    ean13(made),
-                    primary
-                ])
-                .map_err(BenchError::Sql)?;
-                made += 1;
-                i += 1;
+        let mut made: u64 = 0;
+        while made < size.barcodes {
+            let end = (made + SEED_BATCH).min(size.barcodes);
+            let tx = conn.transaction().map_err(BenchError::Sql)?;
+            {
+                let mut ins = tx
+                    .prepare(
+                        "INSERT INTO barcode (id, tenant_id, sku_id, code, is_primary, \
+                         pack_qty_milli, created_at, updated_at, version) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, 1000, 0, 0, 1)",
+                    )
+                    .map_err(BenchError::Sql)?;
+                let mut i: u64 = made;
+                while made < end {
+                    let sku_i = i % size.skus;
+                    let primary = made == sku_i;
+                    if made >= have_barcodes {
+                        ins.execute(params![
+                            format!("barcode-{made}"),
+                            TENANT,
+                            format!("sku-{sku_i}"),
+                            ean13(made),
+                            primary
+                        ])
+                        .map_err(BenchError::Sql)?;
+                    }
+                    made += 1;
+                    i += 1;
+                }
             }
+            tx.commit().map_err(BenchError::Sql)?;
         }
-        tx.commit().map_err(BenchError::Sql)?;
         stats.barcodes = size.barcodes;
     }
 
-    // Customers.
+    // Customers (no RNG).
     {
-        let tx = conn.transaction().map_err(BenchError::Sql)?;
-        {
-            let mut ins = tx
-                .prepare(
-                    "INSERT INTO customer (id, tenant_id, name, created_at, updated_at, version) \
-                     VALUES (?1, ?2, ?3, 0, 0, 1)",
-                )
-                .map_err(BenchError::Sql)?;
-            for i in 0..size.customers {
-                ins.execute(params![
-                    format!("cust-{i}"),
-                    TENANT,
-                    format!("Customer {i}")
-                ])
-                .map_err(BenchError::Sql)?;
+        let mut i = 0u64;
+        while i < size.customers {
+            let end = (i + SEED_BATCH).min(size.customers);
+            let tx = conn.transaction().map_err(BenchError::Sql)?;
+            {
+                let mut ins = tx
+                    .prepare(
+                        "INSERT INTO customer (id, tenant_id, name, created_at, updated_at, version) \
+                         VALUES (?1, ?2, ?3, 0, 0, 1)",
+                    )
+                    .map_err(BenchError::Sql)?;
+                for j in i..end {
+                    if j < have_customers {
+                        continue;
+                    }
+                    ins.execute(params![
+                        format!("cust-{j}"),
+                        TENANT,
+                        format!("Customer {j}")
+                    ])
+                    .map_err(BenchError::Sql)?;
+                }
             }
+            tx.commit().map_err(BenchError::Sql)?;
+            i = end;
         }
-        tx.commit().map_err(BenchError::Sql)?;
         stats.customers = size.customers;
     }
 
     // Sales + lines + payments + movements + aggregates, in batches.
     // 90 days of history; `completed_at` is epoch ms.
-    let mut sale_lines: u64 = 0;
-    let mut movements: u64 = 0;
-    let batch_sales: u64 = 10_000;
-    let mut done_sales: u64 = 0;
-    while done_sales < size.sales {
+    // Line/movement IDs continue from the existing counts, so a resume
+    // never reuses an ID. The RNG is replayed for already-seeded sales
+    // (no inserts) so the stream stays aligned.
+    let mut sale_lines: u64 = have_lines;
+    let mut movements: u64 = have_movements;
+    // Resume point for sales: the last committed batch boundary — or
+    // the whole size when the dataset is already complete (a size
+    // smaller than one batch would otherwise round down to 0 and
+    // re-insert everything).
+    let done_sales = if have_sales == size.sales {
+        size.sales
+    } else {
+        (have_sales / SEED_BATCH) * SEED_BATCH
+    };
+    for _ in 0..done_sales {
+        // These rows already exist; only the RNG draws matter here.
+        // (Counters stay at the existing counts — new rows continue
+        // from there.)
+        let _ = generate_sale(&mut rng, size);
+    }
+    let mut done = done_sales;
+    while done < size.sales {
+        let end = (done + SEED_BATCH).min(size.sales);
         let tx = conn.transaction().map_err(BenchError::Sql)?;
         {
             let mut sale = tx
@@ -318,43 +457,36 @@ pub fn seed(
                      sale_count = sale_count + 1",
                 )
                 .map_err(BenchError::Sql)?;
-            let end = (done_sales + batch_sales).min(size.sales);
-            for s in done_sales..end {
-                let day_offset = i64::from(rng.random_range(0..90));
-                let completed_at = NOW_MS - day_offset * DAY_MS;
-                let day = format!("day-{}", 90 - day_offset);
-                let customer = format!("cust-{}", rng.random_range(0..size.customers));
-                let line_count = rng.random_range(1..=8);
-                let mut total_minor: i64 = 0;
-                for _ in 0..line_count {
-                    let sku_i = rng.random_range(0..size.skus);
-                    let qty_milli: i64 = i64::from(rng.random_range(1..=5) * 1000);
-                    let unit_price_e4: i64 = i64::from(rng.random_range(50..=50_000));
-                    let line_total = qty_milli * unit_price_e4 / 10_000;
-                    let tax = line_total * 18 / 118;
+            for s in done..end {
+                let g = generate_sale(&mut rng, size);
+                for l in &g.lines {
                     line.execute(params![
                         format!("line-{sale_lines}"),
                         format!("sale-{s}"),
-                        format!("sku-{sku_i}"),
-                        qty_milli,
-                        unit_price_e4,
-                        tax,
-                        line_total,
+                        format!("sku-{}", l.sku_i),
+                        l.qty_milli,
+                        l.unit_price_e4,
+                        l.tax,
+                        l.line_total,
                         TENANT
                     ])
                     .map_err(BenchError::Sql)?;
+                    // Sale-movement IDs share the line counter, not the
+                    // total movement counter: receipts (generated after
+                    // the sales) occupy the high IDs, so a resume that
+                    // continued from the total count would collide with
+                    // them. Sale movements are always mov-0..mov-(lines-1).
                     mov.execute(params![
-                        format!("mov-{movements}"),
+                        format!("mov-{sale_lines}"),
                         BRANCH,
-                        format!("sku-{sku_i}"),
-                        -qty_milli,
-                        unit_price_e4,
+                        format!("sku-{}", l.sku_i),
+                        -l.qty_milli,
+                        l.unit_price_e4,
                         format!("sale-{s}"),
-                        completed_at,
+                        g.completed_at,
                         TENANT
                     ])
                     .map_err(BenchError::Sql)?;
-                    total_minor += line_total;
                     sale_lines += 1;
                     movements += 1;
                 }
@@ -364,23 +496,23 @@ pub fn seed(
                     TERMINAL,
                     SHIFT,
                     format!("R-{s:08}"),
-                    customer,
-                    total_minor,
-                    completed_at,
+                    g.customer,
+                    g.total_minor,
+                    g.completed_at,
                     TENANT
                 ])
                 .map_err(BenchError::Sql)?;
                 pay.execute(params![
                     format!("pay-{s}"),
                     format!("sale-{s}"),
-                    total_minor,
+                    g.total_minor,
                     TENANT
                 ])
                 .map_err(BenchError::Sql)?;
-                agg.execute(params![day, BRANCH, total_minor, TENANT])
+                agg.execute(params![g.day, BRANCH, g.total_minor, TENANT])
                     .map_err(BenchError::Sql)?;
             }
-            done_sales = end;
+            done = end;
         }
         tx.commit().map_err(BenchError::Sql)?;
     }
@@ -388,7 +520,13 @@ pub fn seed(
     stats.sale_lines = sale_lines;
     stats.movements = movements;
 
-    // Remaining movements (receipts) to reach the target count.
+    // Remaining movements (receipts) to reach the target count. Each
+    // receipt consumes one RNG draw (sku); replay the draws for
+    // receipts already present (movements beyond the sale lines).
+    let receipts_done = have_movements.saturating_sub(have_lines);
+    for _ in 0..receipts_done {
+        let _ = rng.random_range(0..size.skus);
+    }
     if movements < size.movements {
         let tx = conn.transaction().map_err(BenchError::Sql)?;
         {
@@ -421,6 +559,7 @@ pub fn seed(
     }
 
     // Stock balances from the movements ledger (one row per SKU touched).
+    // INSERT OR REPLACE makes this idempotent: a resume just recomputes it.
     conn.execute_batch(
         "INSERT OR REPLACE INTO stock_balance \
          (branch_id, sku_id, qty_milli, avg_cost_e4, tenant_id, created_at, updated_at, version) \
@@ -476,4 +615,85 @@ pub fn checksum(conn: &Connection) -> Result<String, BenchError> {
     parts.push(format!("sale_sum={sale_sum}"));
     parts.push(format!("line_sum={line_sum}"));
     Ok(parts.join(","))
+}
+
+/// Result of [`verify`]: the dataset checksum plus the per-SKU balance
+/// checks. All counts must be zero for the dataset to be trusted.
+#[derive(Debug)]
+pub struct VerifyReport {
+    /// The [`checksum`] string (counts + sums).
+    pub checksum: String,
+    /// Balance rows whose `qty_milli` differs from the sum of their
+    /// stock movements (must be 0).
+    pub balance_mismatches: i64,
+    /// Distinct (branch, sku) pairs in `stock_movement` with no
+    /// `stock_balance` row (must be 0).
+    pub movements_without_balance: i64,
+    /// Whether `sale_sum == line_sum` (must be true).
+    pub sale_line_sums_match: bool,
+}
+
+/// Verify a seeded (or bench-run) database: the checksum, that every
+/// sale total equals the sum of its lines, and — the strong check —
+/// that every per-SKU `stock_balance.qty_milli` equals the sum of that
+/// SKU's `stock_movement` rows, and that every moved SKU has a balance
+/// row. Used by the `verify` subcommand and by the recovery proof: the
+/// full dataset recovered after the 2026-11-10 VM restart must pass
+/// this before its numbers are trusted.
+///
+/// # Errors
+/// Returns [`BenchError::Sql`] if any check query fails.
+pub fn verify(conn: &Connection) -> Result<VerifyReport, BenchError> {
+    let checksum = checksum(conn)?;
+    let (sale_sum, line_sum): (i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT COALESCE(SUM(total_minor), 0) FROM sale), \
+             (SELECT COALESCE(SUM(total_minor), 0) FROM sale_line)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(BenchError::Sql)?;
+    // Per-SKU check. Aggregate the movements ONCE into a temp table
+    // (one sequential scan), then join it to the balances twice. The
+    // first version did a correlated lookup per balance row (500k
+    // random index probes into 5.4M movements) and took 10+ minutes
+    // on this disk; the aggregate-first version is one scan.
+    // `NOT INDEXED` is load-bearing: without it the planner uses
+    // `idx_movement_branch_sku_time` for index-ordered grouping, but
+    // `qty_milli` is not in that index, so it does one random table
+    // lookup per movement (5.4M lookups, ~26 GB re-read, 20+ min).
+    // Forcing a sequential scan + temp b-tree sort is one pass
+    // (same trap as the 2026-11-10 seed recovery aggregation).
+    conn.execute_batch(
+        "CREATE TEMP TABLE movement_sums AS \
+         SELECT branch_id, sku_id, SUM(qty_milli) AS s \
+         FROM stock_movement NOT INDEXED GROUP BY branch_id, sku_id;",
+    )
+    .map_err(BenchError::Sql)?;
+    let balance_mismatches: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM stock_balance b \
+             LEFT JOIN movement_sums g \
+               ON g.branch_id = b.branch_id AND g.sku_id = b.sku_id \
+             WHERE b.qty_milli != COALESCE(g.s, 0)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(BenchError::Sql)?;
+    let movements_without_balance: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM movement_sums g \
+             LEFT JOIN stock_balance b \
+               ON b.branch_id = g.branch_id AND b.sku_id = g.sku_id \
+             WHERE b.sku_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(BenchError::Sql)?;
+    Ok(VerifyReport {
+        checksum,
+        balance_mismatches,
+        movements_without_balance,
+        sale_line_sums_match: sale_sum == line_sum,
+    })
 }

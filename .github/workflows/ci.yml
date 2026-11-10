@@ -157,3 +157,45 @@ jobs:
             target/release/shopcore-desktop.exe
             target/release/bundle/nsis/*.exe
             target/release/bundle/msi/*.msi
+
+  bench-windows:
+    # Spec 002 hardening (2026-11-10): builds the standalone bench exe
+    # so the user can run the full gate on the target PC with no dev
+    # tools. Runs only when `check` is green. Artifact contains the
+    # exe + RUN.md (one-page instructions, incl. the debug route for
+    # scenarios 7-8).
+    needs: check
+    runs-on: windows-latest
+    # ADR-022: same Strawberry Perl pin as the check job (vendored OpenSSL).
+    env:
+      OPENSSL_SRC_PERL: 'C:\Strawberry\perl\bin\perl.exe'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Put Strawberry Perl first on PATH
+        run: |
+          if (-not (Test-Path "C:\Strawberry\perl\bin\perl.exe")) { throw "Strawberry Perl not found at C:\Strawberry\perl\bin" }
+          Add-Content $env:GITHUB_PATH "C:\Strawberry\perl\bin"
+          perl -v | Select-Object -First 2
+
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+
+      - name: Install just 1.59.0
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.59.0
+
+      - name: Build bench exe (release)
+        run: just bench-exe
+
+      - name: Upload bench exe + RUN.md
+        uses: actions/upload-artifact@v4
+        with:
+          name: shopcore-bench-windows
+          path: |
+            target/release/shopcore-bench.exe
+            crates/bench/RUN.md

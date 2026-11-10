@@ -76,6 +76,30 @@ pub fn load_ui_results(path: &Path) -> Result<UiResults, BenchError> {
     serde_json::from_str(&text).map_err(BenchError::Json)
 }
 
+/// Try to drop the OS file cache so the "cold" barcode lookup is a
+/// true cold read (disk, not the page cache). Best effort:
+/// - Linux: write `3` to `/proc/sys/vm/drop_caches` (needs root).
+///   Returns `true` only if the write succeeds.
+/// - Windows: there is no equivalent a normal user process can do —
+///   dropping the standby list needs an admin tool (`RAMMap`) or a
+///   reboot. Returns `false`; the caller must say so honestly.
+/// - Other platforms: `false`.
+///
+/// A `false` return is not an error — it means the cold number below
+/// is a fresh-connection lookup on a warm cache, and it is labelled
+/// that way instead of "cold".
+#[must_use]
+pub fn drop_os_file_cache() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::write("/proc/sys/vm/drop_caches", "3").is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 /// Scenario 1 — barcode exact lookup, cold (fresh connection) and warm.
 ///
 /// # Errors
@@ -103,7 +127,12 @@ pub fn scenario_barcode_lookup(
     };
     drop(conn);
 
-    // Cold: a fresh connection, first lookup only.
+    // Cold: drop the OS file cache first if possible, then a fresh
+    // connection, first lookup only. If the cache could not be
+    // dropped (no root on Linux, or Windows where a normal process
+    // cannot do it), the number is honestly labelled "fresh
+    // connection" — a warm-cache lookup — not "cold".
+    let cache_dropped = drop_os_file_cache();
     let cold_conn = open_db(db_path)?;
     let code = codes.first().map_or("", String::as_str);
     let started = Instant::now();
@@ -116,11 +145,24 @@ pub fn scenario_barcode_lookup(
         .ok();
     let cold_ms = started.elapsed().as_secs_f64() * 1_000.0;
     drop(cold_conn);
+    let (cold_name, cold_desc) = if cache_dropped {
+        (
+            "1 barcode-lookup (cold)",
+            "first lookup on a fresh connection after dropping the OS file cache",
+        )
+    } else {
+        (
+            "1 barcode-lookup (fresh connection)",
+            "first lookup on a fresh connection — OS page cache NOT dropped \
+             (true cold read needs root on Linux, or a reboot / admin \
+             cache-drop tool on Windows); this is a warm-cache lookup",
+        )
+    };
     out.push(ScenarioResult::single(
-        "1 barcode-lookup (cold)",
-        "first lookup on a fresh connection",
+        cold_name,
+        cold_desc,
         cold_ms,
-        serde_json::json!({ "lookups": 1 }),
+        serde_json::json!({ "lookups": 1, "os_cache_dropped": cache_dropped }),
         Some(("< 50 ms (scan → line)", 50.0)),
     ));
 
@@ -413,21 +455,36 @@ pub fn scenario_sale_commit_under_load(
     db_path: &Path,
     run_id: u64,
 ) -> Result<ScenarioResult, BenchError> {
+    // Open the main connection BEFORE spawning the load threads: the
+    // writer's first batch used to race this open, and the journal-mode
+    // change plus the first commit then contended for the write lock.
+    let mut conn = open_db(db_path)?;
     let stop = Arc::new(AtomicBool::new(false));
     let writer_stop = Arc::clone(&stop);
     let writer_path = db_path.to_path_buf();
     let writer = std::thread::spawn(move || {
         let mut n: u64 = 0;
         while !writer_stop.load(Ordering::Relaxed) {
-            if let Ok(conn) = open_db(&writer_path) {
-                let mut i = 0;
-                while i < 200 {
-                    let _ = conn.execute(
-                        "INSERT INTO bench_scratch (payload) VALUES (?1)",
-                        params![format!("load-{n}")],
-                    );
-                    i += 1;
-                    n += 1;
+            if let Ok(mut conn) = open_db(&writer_path) {
+                // One transaction per 200-row batch, not 200 autocommit
+                // INSERTs. Each autocommit INSERT fsyncs (synchronous=FULL),
+                // so 200 of them back-to-back held/re-acquired the write
+                // lock for seconds on a slow disk and starved the main
+                // thread's commit past its 5 s busy_timeout — the
+                // "database is locked" flake. One batch = one fsync, then
+                // the lock is released for the sleep, giving the main
+                // thread a clean window every batch.
+                if let Ok(tx) = conn.transaction() {
+                    let mut i = 0;
+                    while i < 200 {
+                        let _ = tx.execute(
+                            "INSERT INTO bench_scratch (payload) VALUES (?1)",
+                            params![format!("load-{n}")],
+                        );
+                        i += 1;
+                        n += 1;
+                    }
+                    let _ = tx.commit();
                 }
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -448,7 +505,6 @@ pub fn scenario_sale_commit_under_load(
         }
     });
 
-    let mut conn = open_db(db_path)?;
     let mut sale_no: u64 = 1_000_000;
     let result = measure(50, || {
         sale_no += 1;
@@ -774,14 +830,37 @@ pub fn warmup(db_path: &Path, run_id: u64) -> Result<(), BenchError> {
     Ok(())
 }
 
-/// Open the bench DB with the app's durability settings.
-fn open_db(path: &Path) -> Result<Connection, BenchError> {
+/// Open the bench DB with the app's durability settings. Public so the
+/// `verify` subcommand (the binary) can open a database the same way
+/// the scenarios do.
+///
+/// `busy_timeout` is set FIRST: every later statement waits instead of
+/// failing instantly on contention. The journal mode is VERIFIED, not
+/// changed: `PRAGMA journal_mode=WAL` does not honor `busy_timeout` —
+/// it fails instantly with `SQLITE_BUSY` if another connection holds a
+/// lock — so changing it here was the "database is locked" flake.
+/// Every bench DB is created in WAL mode by the seeder (`schema.rs`),
+/// so a non-WAL database means the seeder was not run; fail loudly
+/// instead of silently running in rollback-journal mode.
+///
+/// # Errors
+/// Returns [`BenchError::Sql`] if the database cannot be opened or a
+/// pragma fails, [`BenchError::Usage`] if the database is not in WAL mode.
+pub fn open_db(path: &Path) -> Result<Connection, BenchError> {
     let conn = Connection::open(path).map_err(BenchError::Sql)?;
     conn.execute_batch(
-        "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; \
-         PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+        "PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
     )
     .map_err(BenchError::Sql)?;
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .map_err(BenchError::Sql)?;
+    if mode != "wal" {
+        return Err(BenchError::Usage(format!(
+            "database {} is not in WAL mode (journal_mode={mode}); seed it first",
+            path.display()
+        )));
+    }
     Ok(conn)
 }
 

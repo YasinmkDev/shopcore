@@ -1,4 +1,7 @@
 /target
+# Bench regression-test DBs live on real disk (not /tmp, which is tmpfs
+# and hides fsync starvation); never commit them.
+crates/bench/target/
 node_modules
 dist
 crates/desktop/src-tauri/gen

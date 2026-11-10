@@ -26,24 +26,113 @@ pub const BASELINE_TOLERANCE_FACTOR: f64 = 5.0;
 pub struct MachineRecord {
     /// CPU model string.
     pub cpu: String,
+    /// CPU cores (physical, when known; 0 = unknown).
+    #[serde(default)]
+    pub cpu_cores: u32,
     /// Total RAM, MiB.
     pub ram_mb: u64,
     /// Disk type: `SSD`, `HDD`, or `unknown`.
     pub disk: String,
     /// OS string.
     pub os: String,
+    /// Windows build, e.g. `Windows 10 Pro 10.0.19045`; `unknown` elsewhere.
+    #[serde(default)]
+    pub windows_build: String,
     /// `WebView2` version (only meaningful for UI scenarios).
     pub webview2: String,
     /// Power plan, when known.
     pub power_plan: String,
 }
 
+/// Run a command and return its trimmed stdout, or `None` on any failure.
+/// Windows-only: the machine probes below are the only callers.
+#[cfg(target_os = "windows")]
+fn run_command(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// Windows-only machine fields: disk type, Windows build, WebView2
+/// version, active power plan. Each is `"unknown"` when its probe fails.
+#[cfg(target_os = "windows")]
+fn detect_windows_fields() -> (String, String, String, String) {
+    let mut disk = "unknown".to_string();
+    let mut windows_build = "unknown".to_string();
+    let mut webview2 = "unknown".to_string();
+    let mut power_plan = "unknown".to_string();
+    // Disk type of the first physical disk (SSD / HDD / Unspecified).
+    if let Some(media) = run_command(
+        "powershell",
+        &[
+            "-NoProfile",
+            "-Command",
+            "(Get-PhysicalDisk | Select-Object -First 1).MediaType",
+        ],
+    ) {
+        disk = media;
+    }
+    // Windows edition + build, e.g. "Microsoft Windows 10 Pro 10.0.19045".
+    if let Some(build) = run_command(
+        "powershell",
+        &[
+            "-NoProfile",
+            "-Command",
+            "(Get-CimInstance Win32_OperatingSystem).Caption + ' ' + (Get-CimInstance Win32_OperatingSystem).Version",
+        ],
+    ) {
+        windows_build = build;
+    }
+    // WebView2 Runtime version from the machine-wide EdgeUpdate key.
+    if let Some(reg) = run_command(
+        "reg",
+        &[
+            "query",
+            r"HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+            "/v",
+            "pv",
+        ],
+    ) {
+        // Output line: "    pv    REG_SZ    128.0.2739.79"
+        if let Some(version) = reg.split_whitespace().last() {
+            webview2 = version.to_string();
+        }
+    }
+    // Active power plan, e.g. "Power Scheme GUID: ... (Balanced)".
+    if let Some(scheme) = run_command("powercfg", &["/getactivescheme"]) {
+        power_plan = scheme;
+    }
+    (disk, windows_build, webview2, power_plan)
+}
+
+/// Non-Windows: these fields do not exist, so they stay "unknown".
+#[cfg(not(target_os = "windows"))]
+fn detect_windows_fields() -> (String, String, String, String) {
+    (
+        "unknown".to_string(),
+        "unknown".to_string(),
+        "unknown".to_string(),
+        "unknown".to_string(),
+    )
+}
+
 impl MachineRecord {
     /// Detect what the OS will tell us; everything else is `"unknown"`.
+    /// On Windows this collects CPU model/cores, RAM, disk type,
+    /// Windows build, `WebView2` version, and the active power plan, so
+    /// a run on the user's machine needs no manual machine record.
     #[must_use]
     pub fn detect() -> Self {
         let mut cpu = "unknown".to_string();
+        let mut cpu_cores: u32 = 0;
         let mut ram_mb: u64 = 0;
+        let (disk, windows_build, webview2, power_plan) = detect_windows_fields();
         if let Ok(info) = std::fs::read_to_string("/proc/cpuinfo") {
             for line in info.lines() {
                 if let Some(model) = line.strip_prefix("model name")
@@ -53,6 +142,8 @@ impl MachineRecord {
                     break;
                 }
             }
+            cpu_cores = u32::try_from(info.lines().filter(|l| l.starts_with("processor")).count())
+                .unwrap_or(0);
         }
         if let Ok(info) = std::fs::read_to_string("/proc/meminfo") {
             for line in info.lines() {
@@ -65,13 +156,49 @@ impl MachineRecord {
                 }
             }
         }
+        #[cfg(target_os = "windows")]
+        {
+            // CPU model + cores (PowerShell; wmic is gone on newer Windows).
+            if let Some(name) = run_command(
+                "powershell",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-CimInstance Win32_Processor | Select-Object -First 1).Name",
+                ],
+            ) {
+                cpu = name;
+            }
+            if let Some(cores) = run_command(
+                "powershell",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-CimInstance Win32_Processor | Select-Object -First 1).NumberOfCores",
+                ],
+            ) {
+                cpu_cores = cores.parse().unwrap_or(0);
+            }
+            if let Some(mb) = run_command(
+                "powershell",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    "[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)",
+                ],
+            ) {
+                ram_mb = mb.parse().unwrap_or(0);
+            }
+        }
         Self {
             cpu,
+            cpu_cores,
             ram_mb,
-            disk: "unknown".to_string(),
+            disk,
             os: std::env::consts::OS.to_string(),
-            webview2: "unknown".to_string(),
-            power_plan: "unknown".to_string(),
+            windows_build,
+            webview2,
+            power_plan,
         }
     }
 }
@@ -198,6 +325,15 @@ pub struct Results {
 }
 
 impl Results {
+    /// Load a results file (as written by `run`).
+    ///
+    /// # Errors
+    /// Returns [`BenchError::Io`] or [`BenchError::Json`] on failure.
+    pub fn load(path: &Path) -> Result<Self, BenchError> {
+        let text = std::fs::read_to_string(path).map_err(BenchError::Io)?;
+        serde_json::from_str(&text).map_err(BenchError::Json)
+    }
+
     /// Serialize to pretty JSON.
     ///
     /// # Errors
@@ -224,11 +360,13 @@ impl Results {
         );
         let _ = writeln!(
             out,
-            "Machine: {} / {} MiB RAM / disk {} / OS {} / WebView2 {} / power {}\n",
+            "Machine: {} ({} cores) / {} MiB RAM / disk {} / OS {} / Windows {} / WebView2 {} / power {}\n",
             self.machine.cpu,
+            self.machine.cpu_cores,
             self.machine.ram_mb,
             self.machine.disk,
             self.machine.os,
+            self.machine.windows_build,
             self.machine.webview2,
             self.machine.power_plan
         );

@@ -70,3 +70,135 @@ fn main() {
             std::process::exit(1);
         });
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    /// `#[tauri::command]` fn names in this file (`main.rs`).
+    fn rust_commands() -> BTreeSet<String> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+        let text = std::fs::read_to_string(&path).expect("read main.rs");
+        let mut out = BTreeSet::new();
+        let mut lines = text.lines().peekable();
+        while let Some(line) = lines.next() {
+            if line.trim() == "#[tauri::command]" {
+                for next in lines.by_ref() {
+                    let next = next.trim();
+                    if next.is_empty() || next.starts_with("///") || next.starts_with("//") {
+                        continue;
+                    }
+                    if let Some(rest) = next.strip_prefix("fn ") {
+                        let name: String = rest.chars().take_while(|c| *c != '(').collect();
+                        out.insert(name.trim().to_string());
+                    }
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// `invoke("name")` / `invoke<T>("name")` string literals in every
+    /// `.ts` / `.tsx` file under `apps/ui/src`. No regex crate: a small
+    /// byte scanner that skips the optional `<...>` generic after
+    /// `invoke`. Byte-based on purpose: the sources contain multi-byte
+    /// UTF-8 (e.g. `…` in comments), so char-index slicing would panic.
+    /// Indexing-free (`.get()` only): the workspace denies
+    /// `clippy::indexing_slicing`.
+    fn ts_invokes() -> BTreeSet<String> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/ui/src");
+        let mut files = Vec::new();
+        collect_ts_files(&root, &mut files);
+        let mut out = BTreeSet::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).expect("read TS file");
+            let bytes = text.as_bytes();
+            let mut i = 0;
+            while i + 6 <= bytes.len() {
+                if bytes.get(i..i + 6).is_some_and(|s| s == b"invoke") {
+                    let mut j = i + 6;
+                    // Skip whitespace and an optional <...> generic.
+                    while bytes.get(j).is_some_and(u8::is_ascii_whitespace) {
+                        j += 1;
+                    }
+                    if bytes.get(j) == Some(&b'<') {
+                        while bytes.get(j).is_some_and(|b| *b != b'>') {
+                            j += 1;
+                        }
+                        j += 1;
+                    }
+                    while bytes.get(j).is_some_and(u8::is_ascii_whitespace) {
+                        j += 1;
+                    }
+                    if bytes.get(j) == Some(&b'(') {
+                        j += 1;
+                        while bytes.get(j).is_some_and(u8::is_ascii_whitespace) {
+                            j += 1;
+                        }
+                        if bytes.get(j).is_some_and(|b| *b == b'"' || *b == b'\'') {
+                            let quote = bytes.get(j).copied().unwrap_or(b'"');
+                            j += 1;
+                            let start = j;
+                            while bytes.get(j).is_some_and(|b| *b != quote) {
+                                j += 1;
+                            }
+                            if let Some(name) = bytes.get(start..j) {
+                                out.insert(String::from_utf8_lossy(name).into_owned());
+                            }
+                        }
+                    }
+                    i = j.max(i + 1);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
+    fn collect_ts_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_ts_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "ts" || e == "tsx") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// ADR-013 drift guard: every Rust `#[tauri::command]` must have a
+    /// matching `invoke("name")` in the UI, and every `invoke` in the
+    /// UI must have a matching Rust command. A rename on one side
+    /// without the other breaks the call at runtime with no compile
+    /// error, so this test is the only thing that catches it.
+    /// (The bench commands are invoked directly from `BenchDebug.tsx`,
+    /// not through `TauriClient`, so the scan covers all of
+    /// `apps/ui/src`, not just the client.)
+    #[test]
+    fn tauri_commands_match_ui_invokes() {
+        let rust = rust_commands();
+        let ts = ts_invokes();
+        assert!(
+            !rust.is_empty(),
+            "no #[tauri::command] found in main.rs — the scan is broken"
+        );
+        assert!(
+            !ts.is_empty(),
+            "no invoke() found under apps/ui/src — the scan is broken"
+        );
+        let missing_in_ui: Vec<_> = rust.difference(&ts).collect();
+        let missing_in_rust: Vec<_> = ts.difference(&rust).collect();
+        assert!(
+            missing_in_ui.is_empty() && missing_in_rust.is_empty(),
+            "Tauri command / UI invoke drift: commands with no UI invoke: {missing_in_ui:?}; \
+             UI invokes with no Rust command: {missing_in_rust:?}"
+        );
+    }
+}
