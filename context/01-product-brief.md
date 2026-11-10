@@ -27,11 +27,14 @@ A fast, offline-first desktop POS and back-office system for retail: single shop
 - Cash: shift open/close, cash in/out, Z-report, expected vs counted.
 - Security: roles/permissions, manager override by PIN, audit log, lock screen.
 - Reports: daily sales, profit/margin, stock valuation, item/category/cashier performance, tax report, export Excel/PDF.
-- Operations: offline mode, multi-branch sync, backup/restore, receipt/invoice designer, multi-language incl. RTL, multi-currency.
+- Operations: offline mode, multi-branch sync, backup/restore, receipt/invoice designer, multi-language incl. RTL.
 - **Migration importer** (products, customers, opening balances, supplier balances). This is the #1 adoption blocker; it ships in v1.
 
 ## v2 (do not build early)
 Advanced promotions engine, online/e-commerce order sync, auto-reorder suggestions, mobile owner dashboard, fiscal/e-invoicing integrations per market (research early, build later), accounting exports, scale-embedded barcodes.
+
+## Phase 3 (later)
+Foreign-currency tender at the payment layer (tender amount + rate recorded on the payment row, converted to tenant currency) and multi-currency reporting (ADR-017).
 
 ## Non-goals (v1)
 Restaurant/table service, manufacturing, payroll, full accounting ledger, mobile POS, marketplace features.
@@ -46,4 +49,4 @@ Restaurant/table service, manufacturing, payroll, full accounting ledger, mobile
 ## Open items (fill when known)
 - Target markets and their tax/fiscal rules: __TBD__ (affects `07-security-compliance`).
 - Weakest supported PC: ASSUMED 4 GB RAM, Windows 10, SSD (see `08-decisions` ADR-011).
-- Currencies and languages for launch: __TBD__.
+- Currencies: v1: single currency per tenant, chosen at tenant setup (ADR-017). Languages for launch: __TBD__.

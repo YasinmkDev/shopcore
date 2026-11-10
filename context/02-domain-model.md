@@ -4,6 +4,7 @@ This file is the source of truth for business logic. If a rule is missing, STOP 
 
 ## Numeric types (all in `crates/domain`)
 - `Money`: `i64` minor units (cents/paisa). Currency exponent comes from a currency table (e.g., 2 for most, 0 for JPY, 3 for KWD).
+- Tenant currency: the tenant's currency and its minor-unit exponent are set at setup and are immutable after the first transaction. Formatting uses the tenant currency. `Money` itself stays currency-agnostic (ADR-017).
 - `UnitPrice` / `UnitCost`: `i64` fixed-point, scale 10^4 of the major unit (needed for precise weighted-average cost). Convert to `Money` only by the rounding rule below.
 - `Qty`: `i64` fixed-point, scale 10^3 (weights, litres). Whole items are multiples of 1000.
 - `Rate`: `u32` basis points (1800 = 18.00%).
