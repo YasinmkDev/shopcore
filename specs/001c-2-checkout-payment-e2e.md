@@ -13,9 +13,16 @@ Phase: 1   Depends on: 000 (scaffold), 000b (Button/TextField + dark theme + `us
    exists in `apps/ui/src/lib/core-client.ts` but is an unimplemented
    stub (throws "not implemented yet (hub spec, Phase 5)"). 001c-2
    builds the HTTP transport for the commands the e2e flow uses, over
-   the SHARED dispatch table (no second implementation). [NOTE: the
-   owner's message was cut off mid-sentence here — "if not, it is
-   built…" — the rest of this amendment is pending his resend.]
+   the SHARED dispatch table (no second implementation) — and ONLY that
+   much: build only the transport the e2e flow needs, shaped so Phase 5
+   can extend it (same interface, same error mapping, no e2e-only
+   shortcuts baked into the transport). The RELEASE UI bundle must NOT
+   contain shim URLs or token handling — a build-time flag strips them
+   (the e2e transport code is excluded from the release bundle, not
+   just disabled at runtime); a test GREPS the release UI bundle for
+   the shim URL/token markers and fails if found. The implementation
+   also runs `cargo deny` AND `cargo tree` for BOTH feature sets
+   (default/release AND `e2e-shim`) and records both outputs.
 
 ## Goal (one sentence, user-visible outcome)
 A cashier discounts (with a manager PIN when needed), takes cash with
@@ -95,7 +102,16 @@ the real Tauri app). The `HttpClient` transport does NOT exist yet — the
 class exists in `apps/ui/src/lib/core-client.ts` but is an unimplemented
 stub (throws "not implemented yet (hub spec, Phase 5)"). 001c-2 builds
 the HTTP transport for the commands the e2e flow uses, over the shared
-dispatch table (no second implementation).
+dispatch table (no second implementation) — and ONLY that much: build
+only the transport the e2e flow needs, shaped so Phase 5 can extend it
+(same interface, same error mapping, no e2e-only shortcuts baked into
+the transport). The RELEASE UI bundle must NOT contain shim URLs or
+token handling — a build-time flag strips them (the e2e transport code
+is excluded from the release bundle, not just disabled at runtime); a
+test GREPS the release UI bundle for the shim URL/token markers and
+fails if found. The implementation also runs `cargo deny` AND
+`cargo tree` for BOTH feature sets (default/release AND `e2e-shim`)
+and records both outputs.
 
 ## Business rules touched (link to `context/02-domain-model.md` sections)
 - Sales (receipt number format, cash rounding OFF by default / ON as a
@@ -153,7 +169,12 @@ from release builds (see E2E approach).
   the real core; asserts the sale, the change (52.32 / 60.00 / 7.68),
   the receipt queue, and the cleared cart with focus on the scan input.
   Plus the release-absence test (shim absent from release builds) and a
-  test that the shim rejects requests without the per-run token.
+  test that the shim rejects requests without the per-run token. Plus a
+  test that GREPS the release UI bundle for shim URLs / token handling
+  and fails if found (the build-time flag strips them — the e2e
+  transport code is excluded from the release bundle, not just disabled
+  at runtime). `cargo deny` AND `cargo tree` are run and recorded for
+  BOTH feature sets (default/release AND `e2e-shim`).
 - Bench: seeded DB, budgets above (scan, tender→commit, focus return).
 - `just check` green (fmt, clippy -D warnings, deny, nextest, tsc,
   eslint, vitest).
