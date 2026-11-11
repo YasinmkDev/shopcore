@@ -18,14 +18,17 @@
 
   /* text */
   --text:          #1B1B1A;
-  --text-muted:    #6B6A66;
+  /* --text-muted is a clear step darker than --text-faint (#6A6965)
+     so the two stay visibly distinct (owner decision 2026-11-10):
+     #55544F = 7.59:1 vs surface, 7.07:1 vs surface-subtle, 6.60:1 vs
+     surface-sunken (≥ 4.5:1 on all three). */
+  --text-muted:    #55544F;
   /* Placeholders are never the only label (the label is always present;
      the placeholder is a hint only). --text-faint is ≥ 4.5:1 against all
      three surfaces (owner decision 2026-11-10): #6A6965 = 5.50:1 vs
-     surface, 5.12:1 vs surface-subtle, 4.78:1 vs surface-sunken. Note:
-     it is one step darker than --text-muted — the 4.5:1 bar against the
-     darkest surface leaves no room for a lighter faint grey, so the
-     faint/muted distinction is by usage, not by colour. */
+     surface, 5.12:1 vs surface-subtle, 4.78:1 vs surface-sunken. It is
+     one step LIGHTER than --text-muted, so the faint/muted distinction
+     is visible by colour again. */
   --text-faint:    #6A6965;
   --text-on-accent:#FFFFFF;
 

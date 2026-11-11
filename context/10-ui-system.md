@@ -29,7 +29,7 @@ Implement as CSS variables in `packages/ui-kit/tokens.css`; Tailwind maps to the
 
   /* text */
   --text:          #1B1B1A;
-  --text-muted:    #6B6A66;
+  --text-muted:    #55544F;  /* ≥ 4.5:1 vs all three surfaces (7.59 / 7.07 / 6.60:1) — a clear step darker than --text-faint so the two stay visibly distinct (owner decision 2026-11-10). */
   --text-faint:    #6A6965;  /* ≥ 4.5:1 vs surface, surface-subtle and surface-sunken (5.50 / 5.12 / 4.78:1). Placeholders are never the only label. */
   --text-on-accent:#FFFFFF;
 
