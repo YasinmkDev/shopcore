@@ -37,7 +37,7 @@ Golden examples (must exist as tests):
 - Inclusive tax + bill discount: gross 118.00 @18% inclusive with 10% bill discount → discounted gross 106.20, net 90.00, tax 16.20.
 - Multiple taxes: net 0.30 with 5% + 13% → 0.02 + 0.04 = 0.06 (vs 0.05 if the 18% were combined first).
 
-Multiple taxes (compound or additive) are configured per tax group; default additive. Each tax component is rounded separately (`tax_i = round(net × rate_i)`); the line tax is the sum of the rounded components. Tax-exempt customers/items set tax to 0 with an audit-visible reason.
+Multiple taxes (compound or additive) are configured per tax group; default additive. Each tax component is rounded separately (`tax_i = round(net × rate_i)`); the line tax is the sum of the rounded components. **Inclusive multi-rate split:** the net is derived from the COMBINED rate (`net = round(gross / (1 + sum(rate_i)))`), so net + tax always equals the gross; the total tax is then split across the components by rate via largest remainder, so the components sum exactly to the total tax. (Golden: 118.00 @5%+13% inclusive → net 100.00, tax 18.00, components 5.00 + 13.00.) Tax-exempt customers/items set tax to 0 with an audit-visible reason.
 
 ## Promotions (v1)
 Types: percent off item/category, fixed amount off, buy X get Y (cheapest or specified free), bundle price, time-windowed, customer-group restricted. Rules:

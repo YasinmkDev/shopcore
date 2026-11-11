@@ -3,6 +3,20 @@
 Status: Draft (needs human approval before implementation)
 Phase: 1   Depends on: 000 (scaffold), 000b (Button/TextField + dark theme + `useMotionTier`), 001a (checkout domain), 001b-1 (foundation), 001b-2 (transaction), 001c-1 (UI core), 002 (benchmark harness), 005 (outbox)
 
+## Amendments (approved 2026-11-10, applied in this spec)
+1. E2E option A with all five conditions stands. The DESKTOP crate
+   (`crates/desktop`) serves HTTP under the `e2e-shim` cargo feature —
+   axum is added as an OPTIONAL dependency of the desktop crate,
+   enabled only by that feature. The implementation proves with
+   `cargo tree` that the RELEASE dependency graph excludes axum (and
+   the shim). The `HttpClient` transport does NOT exist yet — the class
+   exists in `apps/ui/src/lib/core-client.ts` but is an unimplemented
+   stub (throws "not implemented yet (hub spec, Phase 5)"). 001c-2
+   builds the HTTP transport for the commands the e2e flow uses, over
+   the SHARED dispatch table (no second implementation). [NOTE: the
+   owner's message was cut off mid-sentence here — "if not, it is
+   built…" — the rest of this amendment is pending his resend.]
+
 ## Goal (one sentence, user-visible outcome)
 A cashier discounts (with a manager PIN when needed), takes cash with
 change, and gets a receipt — and the whole flow is proven end to end
@@ -58,7 +72,11 @@ the REAL core (real SQLite, real use cases), not a mocked UI, via a thin
 dev-only HTTP shim over the real core. Conditions (all required):
 - **Cargo feature gate** (not only `debug_assertions` + an env flag):
   the shim is behind a Cargo feature (e.g. `e2e-shim`), enabled only in
-  dev/test builds. The release profile never enables it.
+  dev/test builds. The release profile never enables it. The shim lives
+  in the DESKTOP crate (`crates/desktop`) — axum is added as an OPTIONAL
+  dependency of the desktop crate, enabled only by the `e2e-shim`
+  feature. The implementation proves with `cargo tree` that the RELEASE
+  dependency graph excludes axum (and the shim).
 - **Bind 127.0.0.1 only** — the shim never listens on a LAN interface.
 - **Random per-run token**: the shim requires a token generated fresh
   per run (passed to the test runner via env); requests without it are
@@ -73,7 +91,11 @@ Playwright (`@playwright/test` 1.65.0) is approved to add WHEN 001c-2
 STARTS (not before). The e2e drives the browser build of the UI pointed
 at the shim; the UI uses the `CoreClient` HTTP transport (03 — the UI is
 unaware of deployment mode, so the same code runs against the shim and
-the real Tauri app).
+the real Tauri app). The `HttpClient` transport does NOT exist yet — the
+class exists in `apps/ui/src/lib/core-client.ts` but is an unimplemented
+stub (throws "not implemented yet (hub spec, Phase 5)"). 001c-2 builds
+the HTTP transport for the commands the e2e flow uses, over the shared
+dispatch table (no second implementation).
 
 ## Business rules touched (link to `context/02-domain-model.md` sections)
 - Sales (receipt number format, cash rounding OFF by default / ON as a
@@ -90,13 +112,16 @@ the real Tauri app).
 None. All tables land in 001b-1. No migration in this spec.
 
 ## Core/API changes (commands, events, errors with codes, permissions)
-No new commands — the commands land in 001c-1. The e2e shim exposes the
-SAME commands through the shared dispatch table (see E2E approach) — no
-second API surface. Error codes: `BARCODE_NOT_FOUND`, `SHIFT_NOT_OPEN`,
-`DISCOUNT_NEEDS_APPROVAL`, `INSUFFICIENT_TENDER`, `PRINT_QUEUED`.
-Permissions enforced in 001b; the UI only renders the outcomes.
-`just gen-types` output must stay fresh (ADR-013 drift-guard test covers
-command ↔ invoke parity).
+New commands in THIS spec (moved from 001c-1 — the ADR-013 drift guard
+requires a UI caller for every command, and these two get their callers
+here): `draft_apply_discount` (called by the ManagerPinPopover) and
+`complete_sale_cash` (called by the PaymentPanel). The e2e shim exposes
+the SAME commands through the shared dispatch table (see E2E approach)
+— no second API surface. Error codes: `BARCODE_NOT_FOUND`,
+`SHIFT_NOT_OPEN`, `DISCOUNT_NEEDS_APPROVAL`, `INSUFFICIENT_TENDER`,
+`PRINT_QUEUED`. Permissions enforced in 001b; the UI only renders the
+outcomes. `just gen-types` output must stay fresh (ADR-013 drift-guard
+test covers command ↔ invoke parity).
 
 ## UI (screens, components from registry, states, keyboard shortcuts, motion tier behavior)
 Screens: sell screen (payment panel + completion). Components:

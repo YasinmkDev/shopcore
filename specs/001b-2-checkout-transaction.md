@@ -3,6 +3,29 @@
 Status: Draft (needs human approval before implementation)
 Phase: 1   Depends on: 000 (scaffold), 001a (checkout domain), 001b-1 (foundation), 002 (benchmark harness), 005 (outbox)
 
+## Amendments (approved 2026-11-10, applied in this spec)
+1. Draft persistence: a SEPARATE scratch DB file with its own
+   connection and `synchronous=NORMAL` (not the main DB). Recorded in
+   ADR-034 with the accepted loss window.
+2. `complete_sale_cash` is idempotent per `draft_id` (second call
+   returns the existing sale). Restore discards a draft whose sale
+   exists; a late flush must not resurrect a completed draft
+   (tombstone). Double-submit tested.
+3. New use cases: `draft_cancel` (audit row if the cart had lines) and
+   `draft_restore_line` (single-level undo of a removal).
+4. Audit hash = SHA-256(`prev_hash` || canonical field encoding in
+   fixed order, never JSON map order), per terminal; a verify use case
+   runs in the background at startup; tampered row tested.
+5. Negative stock: allowed and recorded; "flagged" = a `balance < 0`
+   query, no new table; tested.
+6. Crash tests: real process kills + fault injection on the Windows CI
+   job. They prove atomicity and recovery, NOT power-loss flushing
+   (stated plainly). A manual power-pull test is added to the
+   pre-pilot checklist (owner: user).
+7. Audit events limited to those with a producer in this spec (sale
+   completion, discount approval, cart cancel, reprint, lockout seam);
+   shift events land with their use cases.
+
 ## Goal (one sentence, user-visible outcome)
 A cash sale is one atomic database transaction: it either completes fully
 (sale, lines, payment, stock, balances, aggregates, audit, outbox) or not
@@ -31,24 +54,37 @@ payments, returns, hold/recall, customers, card/wallet.
 1. Draft cart: every change goes through the draft use cases
    (`draft_add_line`, `draft_set_qty`, `draft_remove_line`,
    `draft_apply_discount`); the draft is persisted in `draft_sale` /
-   `draft_line` (migrated in 001b-1) and restored after crash/restart.
+   `draft_line` (migrated in 001b-1, stored in the scratch DB per
+   req. 2) and restored after crash/restart.
+11. New use cases: `draft_cancel` — discards the draft; if the cart
+    had lines, it writes an AUDIT row (cart cancel, with the cart
+    contents summarised). `draft_restore_line` — single-level UNDO of
+    a removal: restores the most recently removed line (one level only;
+    a second call is a no-op). Both go through the DB actor and the
+    scratch DB like the other draft use cases.
 2. Draft persistence MUST NOT put a `synchronous=FULL` flush on the
    scan path (the scan path is the hot path — a FULL flush per keystroke
-   would break the < 50 ms budget). Accepted approach: a COALESCED
-   ASYNC FLUSH (draft writes batch and flush within ~250 ms of the last
-   change) or an ATTACHED SCRATCH DB with `synchronous=NORMAL` for the
-   draft (the sale commit stays `synchronous=FULL`). The ACCEPTED LOSS
-   WINDOW is documented in the code and the session summary: at most
-   the last ~250 ms of draft edits (or the scratch DB's unflushed tail)
+   would break the < 50 ms budget). Decided approach: a SEPARATE
+   SCRATCH DB FILE with its own connection and `synchronous=NORMAL`
+   for the draft (the sale commit stays `synchronous=FULL` on the main
+   DB). The ACCEPTED LOSS WINDOW is recorded in ADR-034 (written in
+   this spec's implementation): at most the scratch DB's unflushed tail
    can be lost in a power cut — the committed sale is never affected,
    and the worst case is the cashier re-scans the last line or two.
+   The draft write goes to the scratch DB only; the main DB never sees
+   a draft flush.
 3. `complete_sale_cash`: ONE SQLite transaction writing sale, lines,
    per-component tax rows (`sale_line_tax`), payment, stock movements,
    balances, aggregates, audit, and the outbox row. Totals come from
    the 001a domain functions. Stock balances are written ONLY by the
    posting function (never directly). The sale commits only if a shift
    is open (`SHIFT_NOT_OPEN` otherwise) and the caller holds
-   `sale.create`.
+   `sale.create`. IDEMPOTENT per `draft_id` (the UNIQUE key from
+   001b-1): a second call with the same `draft_id` returns the EXISTING
+   sale (no second sale, no second stock posting). Restore DISCARDS a
+   draft whose sale exists; a late scratch-DB flush must NOT resurrect
+   a completed draft — the completed draft is TOMBSTONED (the tombstone
+   is checked before any restore/flush applies).
 4. Line discount above the cashier's threshold requires manager PIN
    (approval recorded with both users, audited); without approval →
    `DISCOUNT_NEEDS_APPROVAL`. PINs are verified against Argon2id hashes
@@ -66,13 +102,21 @@ payments, returns, hold/recall, customers, card/wallet.
    `PRINT_QUEUED`); hardware never blocks the commit. Real drivers plug
    in via specs 003/004 with no change to this code.
 8. Audit writing: every sensitive action writes an audit row (sale
-   completion, discount, price override, drawer open, shift open/close,
-   reprint, PIN lockout — the lockout event comes from 001b-1). Each
-   row: who, what, entity, before/after, reason, terminal, time (07).
-   The audit_log has a TAMPER-EVIDENT HASH CHAIN from day one (07 line
-   19): each row stores the hash of the previous row; the chain is
-   verified on read and a broken chain is reported, never silently
-   repaired. No audit row is ever written without its chain link.
+   completion, discount approval, cart cancel, reprint, PIN lockout —
+   the lockout event comes from 001b-1). ONLY events with a producer
+   in THIS spec are written here; shift open/close events land with
+   their use cases (a later spec), not here. Each row: who, what,
+   entity, before/after, reason, terminal, time (07). The audit_log has
+   a TAMPER-EVIDENT HASH CHAIN from day one (07 line 19): each row
+   stores the hash of the previous row; the chain is verified on read
+   and a broken chain is reported, never silently repaired. Hash
+   formula: `row_hash = SHA-256(prev_hash || canonical field encoding
+   in FIXED order)` — the fields are concatenated in a fixed,
+   documented order, NEVER JSON map order (map order is not stable).
+   The chain is PER TERMINAL. A VERIFY use case runs in the background
+   at startup (it walks the chain and reports the first broken link);
+   it never blocks the sale path. No audit row is ever written without
+   its chain link.
 9. Outbox: every local mutation writes an outbox row in the same
    transaction (04 line 38); the outbox schema is the one from spec 005
    (`sync-client` helpers `ensure_outbox_schema` / `mark_sent`); the
@@ -80,7 +124,11 @@ payments, returns, hold/recall, customers, card/wallet.
    (04 line 53).
 10. Stock posting: sale writes a `stock_movement` per line (append-only)
     and updates `stock_balance` via the posting function only; after any
-    sequence, `balance == sum(movements)` per (branch, sku).
+    sequence, `balance == sum(movements)` per (branch, sku). NEGATIVE
+    stock is ALLOWED and recorded (a sale that takes the balance below
+    zero still posts; the movement and the negative balance are both
+    kept). "Flagged" negative stock = a `balance < 0` QUERY — no new
+    table, no new column.
 
 ## Business rules touched (link to `context/02-domain-model.md` sections)
 - Sales (states `draft → held → completed` / `voided`; completed sales
@@ -138,18 +186,31 @@ None.
   a valid hash chain; outbox row created in the same transaction;
   aggregates updated; per-component tax rows (`sale_line_tax`) sum to
   the line tax.
-- Draft: draft persists and restores after restart; the draft flush does
-  NOT run synchronously on the scan path (test asserts the scan path
-  never calls a FULL flush — the flush is coalesced/async or on the
-  scratch DB); the documented loss window is tested (kill within the
-  window → at most the last ~250 ms of draft edits lost, never a
-  committed sale).
+- Double-submit: calling `complete_sale_cash` twice with the same
+  `draft_id` returns the SAME sale (one sale row, one stock posting);
+  restore discards a draft whose sale exists; a late scratch-DB flush
+  after completion does NOT resurrect the draft (tombstone checked).
+- Draft: draft persists (scratch DB) and restores after restart; the
+  draft flush does NOT run synchronously on the scan path (test asserts
+  the scan path never touches the main DB with a FULL flush); the
+  documented loss window is tested (kill within the window → at most
+  the scratch DB's unflushed tail lost, never a committed sale).
+  `draft_cancel` writes an audit row when the cart had lines;
+  `draft_restore_line` restores the most recently removed line once.
+- Audit: a TAMPERED row (one field changed after writing) is caught by
+  the verify use case (chain break reported with the row id); the
+  verify use case runs in the background at startup.
+- Negative stock: a sale that takes a balance below zero posts and is
+  recorded; the `balance < 0` query flags it (no new table).
 - Crash: FAULT-INJECTION points (injected failure at each commit step)
   PLUS real process kills at random points during sale commit (and
   during migration); on restart the DB is consistent — one complete sale
   or none, balances match ledger, draft restored. Crash tests RUN ON
   THE WINDOWS CI JOB (not only Linux) — the kill/restart behaviour
-  differs by OS and the till is Windows.
+  differs by OS and the till is Windows. Stated plainly: these tests
+  prove ATOMICITY and RECOVERY, NOT power-loss flushing. A MANUAL
+  POWER-PULL test is added to the pre-pilot checklist (owner: user) —
+  it is the only test that proves flushing survives a real power cut.
 - Hardware: `MockPrinter` offline → sale completes, reprint queued
   (`PRINT_QUEUED`); `MockScanner` feeds scans through the mpsc channel.
 - Permission: discount above threshold without PIN → rejected + audited;
@@ -178,8 +239,17 @@ None.
   default), when I complete, then change 7.68 is recorded and the
   receipt number matches `{branch_code}-{terminal_code}-{yyyymmdd}-{seq}`
   with no rounding line.
+- Given a completed sale, when I call `complete_sale_cash` again with
+  the same `draft_id`, then I get the SAME sale back (no second sale,
+  no second stock posting).
+- Given a sale that takes a SKU's balance below zero, when I complete
+  it, then the movement and the negative balance are recorded, and the
+  `balance < 0` query flags the SKU.
+- Given a cart with lines, when I cancel it, then the draft is discarded
+  and an audit row is written; given a removed line, when I undo once,
+  then the line is restored (a second undo is a no-op).
 - Given a kill during draft editing, when the app restarts, then at most
-  the last ~250 ms of draft edits are lost and no committed sale is
+  the scratch DB's unflushed tail is lost and no committed sale is
   affected.
 
 ## Risks / open questions

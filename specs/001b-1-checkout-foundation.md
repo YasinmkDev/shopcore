@@ -3,6 +3,31 @@
 Status: Draft (needs human approval before implementation)
 Phase: 1   Depends on: 000 (scaffold), 001a (checkout domain), 002 (benchmark harness), 005 (outbox)
 
+## Amendments (approved 2026-11-10, applied in this spec)
+1. New tables: `branch`, `terminal`, `settings` (scoped key/value),
+   `receipt_counter` (terminal_id, date, last_seq — updated inside the
+   sale transaction), `print_job` (standard 04 columns).
+2. `role` gets `max_line_discount_bps` + a permission set; `user` gets
+   lockout columns.
+3. `audit_log` schema includes `prev_hash`/`row_hash` now; the chain is
+   per terminal. `sale` gets `draft_id` UNIQUE.
+4. Append-only enforced with SQLite triggers (no UPDATE/DELETE) on
+   `stock_movement`, `audit_log`, completed sale rows; tested.
+5. Manager approval = select manager + PIN (never PIN-only scanning).
+   Lockout: 5 failures → 5 min, configurable, dummy hash for unknown
+   users. Recorded in ADR-032 with the measured verify time. argon2
+   0.6.0 stays conditional on `cargo deny` in the real workspace.
+6. Minimal semantic `PrintDoc` defined in `crates/hardware` (content,
+   not ESC/POS bytes).
+7. Dev seed behind a `dev-seed` cargo feature (not enabled by any
+   release profile); release-absence test = CI builds release and greps
+   the binary for a seed marker.
+8. Crate supply stated (UUIDv7 → `uuid`, dates → no crate, SHA-256 →
+   `sha2`, JSON → `serde_json`); "no new dependency" proven with
+   `cargo tree`.
+9. The in-memory prefix index is invalidated by a catalog version
+   counter.
+
 ## Goal (one sentence, user-visible outcome)
 The checkout flow has a real database to stand on: the tables it uses, a
 safe way to reach them, users who can sign in with a PIN, and mock
@@ -35,9 +60,12 @@ split payments, returns, hold/recall, customers, card/wallet.
    `sale_line`, `sale_payment`, `sale_line_tax`); stock
    (`stock_movement` append-only, `stock_balance`); aggregates
    (`daily_sales_summary`, `daily_item_sales`, `daily_cash_summary`);
-   `shift`; `user`, `role`; `audit_log`; `outbox`; draft
-   (`draft_sale`, `draft_line`). Indexes per `04` (`barcode(tenant_id,
-   code)` unique, `sku(tenant_id, code)`,
+   identity (`branch`, `terminal`); `shift`; `user`, `role`;
+   `settings` (scoped key/value — see req. 12); `receipt_counter`
+   (`terminal_id`, `date`, `last_seq`, updated INSIDE the sale
+   transaction in 001b-2); `print_job` (standard 04 columns);
+   `audit_log`; `outbox`; draft (`draft_sale`, `draft_line`). Indexes
+   per `04` (`barcode(tenant_id, code)` unique, `sku(tenant_id, code)`,
    `sale(branch_id, completed_at)`, `sale_line(sale_id)`,
    `stock_movement(branch_id, sku_id, occurred_at)`,
    `outbox(sent_at) WHERE sent_at IS NULL` partial index) and FTS5 over
@@ -53,12 +81,17 @@ split payments, returns, hold/recall, customers, card/wallet.
    access from use cases.
 4. `search_skus`: barcode exact match = single indexed lookup; name
    search = in-memory prefix index for hot SKUs + FTS5 for the rest
-   (05 budgets).
+   (05 budgets). The in-memory prefix index is INVALIDATED by a
+   catalog version counter (bumped on every catalog write); a stale
+   index is never served — a version mismatch rebuilds it before the
+   query runs.
 5. `lookup_barcode`: known barcode → SKU + active price; unknown barcode
    → `BARCODE_NOT_FOUND`.
-6. Users/roles: `user` (username, Argon2id PIN hash, role, failed
-   attempts, lockout state), `role` (permissions). Permission checker:
-   `has_permission(user, permission)` for `sale.create`,
+6. Users/roles: `user` (username, Argon2id PIN hash, role, lockout
+   columns — failed attempts, locked-until), `role` (permission set +
+   `max_line_discount_bps` — the per-role line-discount ceiling the
+   manager-PIN threshold in 001b-2 compares against). Permission
+   checker: `has_permission(user, permission)` for `sale.create`,
    `sale.discount.line` and the rest of the 07 list (the checker is
    generic; the checkout permissions are the first users).
 7. PIN hashing: Argon2id via the `argon2` crate (0.6.0, approved
@@ -69,13 +102,17 @@ split payments, returns, hold/recall, customers, card/wallet.
    The measured verification time is recorded in a new ADR (ADR-032)
    during implementation; if it is too slow for the till, the ADR
    records the chosen trade-off instead of silently weakening it.
-8. PIN lockout: after repeated failed verifications (threshold per
-   07 — lockout after repeated failures), the user is locked out for a
-   configured duration; the lockout state lives on the `user` row
-   (failed attempts + locked-until). Every lockout is AUDITED — the
-   audit row is written by 001b-2's audit writer from the lockout event
-   this spec emits (the seam is explicit: 001b-1 emits the event,
-   001b-2 persists it).
+8. PIN lockout: 5 failed verifications → 5 minutes locked out
+   (configurable via the `settings` table). The lockout state lives on
+   the `user` row (failed attempts + locked-until). Unknown usernames
+   are verified against a DUMMY Argon2id hash (same cost as a real
+   verification) so the timing does not reveal whether the user exists.
+   Every lockout is AUDITED — the audit row is written by 001b-2's
+   audit writer from the lockout event this spec emits (the seam is
+   explicit: 001b-1 emits the event, 001b-2 persists it). Manager
+   approval is ALWAYS select-manager + PIN (the approver is chosen
+   from the user list, then enters their PIN) — NEVER PIN-only scanning
+   (a bare PIN with no named approver is rejected).
 9. Migrations ADR (ADR-031, recorded in `08-decisions.md` in this
    spec's commit): migrations may be SQUASHED / REWRITTEN until the
    first customer install; after the first customer install they are
@@ -86,14 +123,37 @@ split payments, returns, hold/recall, customers, card/wallet.
     not `Stream`). The stale `crates/hardware/src/lib.rs` comment ("traits
     land with the Phase 0 hardware spike specs") is updated — the traits
     land HERE. Real drivers plug in via specs 003/004 with no change to
-    this code.
+    this code. `PrintDoc` is defined HERE as a minimal SEMANTIC document
+    in `crates/hardware` — content only, NOT ESC/POS bytes: header lines,
+    line items (name, qty, unit price, line total), totals, payments,
+    footer lines, and a QR/barcode payload if any. Rendering to ESC/POS
+    (or to a PDF/HTML preview) is spec 003's job; 001b-2 only queues a
+    `PrintDoc`.
 11. Dev seed: a small, realistic dataset using the REAL tables (one
     branch, one terminal, one open shift, a cashier + a manager with
     PINs, a sample catalog with barcodes/prices/tax groups, stock
-    balances). The seed is dev/test ONLY: it is `cfg`-gated out of
-    release builds, and a test asserts the seed is ABSENT from release
-    builds (no seed code, no seed route, no seed data in the shipped
-    binary).
+    balances). The seed is behind a Cargo feature `dev-seed`, NOT
+    enabled by any release profile. The release-absence test = CI builds
+    the release binary and GREPS it for a seed marker (a unique string
+    the seed code contains); the test fails if the marker is found.
+12. `settings` table: scoped key/value (`scope` = tenant / branch /
+    terminal, `key`, `value` as TEXT, `updated_at`). Keys this spec
+    defines: tenant currency + minor-unit exponent, cash-rounding
+    granularity (default OFF), tax defaults, active price list. The
+    settings store is read by the DB actor; writes go through the
+    actor (no direct access).
+13. Append-only enforcement: SQLite TRIGGERS forbid UPDATE/DELETE on
+    `stock_movement`, `audit_log`, and on COMPLETED `sale` /
+    `sale_line` / `sale_payment` rows (draft rows may still be edited
+    by the draft use cases in 001b-2; once a sale is completed, its
+    rows are immutable). The triggers are tested (an UPDATE/DELETE
+    attempt fails with a trigger error).
+14. `audit_log` schema includes `prev_hash` / `row_hash` columns NOW
+    (the chain is implemented in 001b-2, but the columns land here so
+    no row is ever written without them). The hash chain is PER
+    TERMINAL (each terminal has its own chain head). `sale` gets
+    `draft_id` UNIQUE (the idempotency key for `complete_sale_cash` in
+    001b-2 — a draft maps to at most one sale).
 
 ## Business rules touched (link to `context/02-domain-model.md` sections)
 - Numeric types (via the 001a domain types — this spec stores them, it
@@ -107,10 +167,14 @@ split payments, returns, hold/recall, customers, card/wallet.
 ## Data changes (tables/columns/migrations/indexes; sync impact)
 Migrations per requirement 1 (full column lists in `04-data-and-sync.md`;
 `draft_sale` / `draft_line` are defined here — gap fix 1 from the 001
-re-check: add them to 04 as part of this spec; `sale_line_tax` is defined
-here too). Sync impact: none in this spec — the outbox table is created
-here, but outbox WRITING lands in 001b-2 (the schema is the one from
-spec 005).
+re-check: add them to 04 as part of this spec; `sale_line_tax`,
+`branch`, `terminal`, `settings`, `receipt_counter`, `print_job` are
+defined here too). `audit_log` carries `prev_hash` / `row_hash`
+(req. 14, chain per terminal); `sale` carries `draft_id` UNIQUE
+(req. 14). Append-only triggers (req. 13) forbid UPDATE/DELETE on
+`stock_movement`, `audit_log`, and completed sale rows. Sync impact:
+none in this spec — the outbox table is created here, but outbox
+WRITING lands in 001b-2 (the schema is the one from spec 005).
 
 ## Core/API changes (commands, events, errors with codes, permissions)
 Internal API only (no Tauri commands — those are 001c). Errors:
@@ -149,13 +213,24 @@ None.
   lookup; FTS5 finds by name/code; unknown barcode → `BARCODE_NOT_FOUND`.
 - PIN: Argon2id hash verifies a correct PIN and rejects a wrong one;
   verification is off the UI thread (test asserts the call does not run
-  on the main thread); lockout after the configured failures, unlock
-  after the duration; lockout event emitted.
+  on the main thread); lockout after 5 failures for 5 minutes, unlock
+  after the duration; unknown usernames take the same time as known
+  ones (dummy hash); lockout event emitted. Manager approval requires
+  select-manager + PIN (a bare PIN with no named approver is rejected).
+- Append-only triggers: an UPDATE/DELETE on `stock_movement`,
+  `audit_log`, or a completed sale row fails with a trigger error;
+  draft rows remain editable until completion.
 - Hardware: `MockPrinter` / `MockScanner` implement the traits;
-  `MockScanner` feeds scans through the mpsc channel.
+  `MockScanner` feeds scans through the mpsc channel. `PrintDoc` is
+  semantic content only (no ESC/POS bytes in this crate).
 - Dev seed: seed applies on a fresh DB and produces a usable till
-  (branch, terminal, open shift, users, catalog, stock); a test asserts
-  the seed is ABSENT from release builds.
+  (branch, terminal, open shift, users, catalog, stock); the seed is
+  behind the `dev-seed` cargo feature (not enabled by any release
+  profile); the release-absence test builds the release binary in CI
+  and greps it for the seed marker.
+- Catalog version counter: a catalog write bumps the version and the
+  in-memory prefix index rebuilds on the next query (a stale index is
+  never served).
 - `just check` green (fmt, clippy -D warnings, deny, nextest, tsc,
   eslint, vitest).
 
@@ -192,3 +267,16 @@ No other new dependency. tokio, rusqlite, `shopcore-domain`/`core`/`db`/
 `hardware`/`protocol` are already workspace dependencies/members.
 `tokio::sync::mpsc` (already enabled via tokio `sync`) carries scanner
 events (ADR-030) — no `futures`/`tokio-stream` dependency.
+
+## Crate supply (amendment 8 — "no new dependency" proof)
+| Needed by this spec | Supplied by | Status |
+|---|---|---|
+| UUIDv7 IDs | `uuid` 1.29.2 (workspace dep, features `v7`, `serde`) | Already present — no new dep |
+| Dates / timestamps | NO crate — dates are ISO-8601 TEXT (or Unix millis INTEGER) in SQLite; the domain validates the format (`receipt.rs` validates 8-digit dates, no date library) | No new dep |
+| SHA-256 (audit chain) | `sha2` 0.11.1 (workspace dep, from spec 005) | Already present — no new dep |
+| JSON (golden/seed data) | `serde_json` 1.0.154 (workspace dep) | Already present — no new dep |
+The implementation proves "no new dependency" with `cargo tree`
+(run against the workspace after adding `argon2`): the tree must show
+`argon2` as the ONLY new crate vs the pre-001b-1 lockfile. Any further
+addition needs the usual proof table (pinned version, `cargo info`,
+Cargo.lock entry, `cargo deny` license result) before it is used.
