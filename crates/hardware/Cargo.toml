@@ -8,6 +8,8 @@ publish = false
 description = "ShopCore hardware: driver traits + implementations + mock drivers (printer, scanner, drawer, scale, display, payment terminal, label printer)."
 
 [dependencies]
+tokio = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

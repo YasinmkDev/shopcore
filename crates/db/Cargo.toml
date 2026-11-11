@@ -9,6 +9,8 @@ description = "ShopCore db: migrations (SQL), queries, FTS, aggregates. SQLite (
 
 [dependencies]
 rusqlite = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

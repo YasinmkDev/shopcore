@@ -51,6 +51,12 @@ tower-http = { version = "0.6.11", features = ["fs"] }
 # tower (for ServiceExt::oneshot, used to delegate snapshot downloads to
 # tower-http ServeFile so Range is handled by tower-http, not by hand).
 tower = "0.5.3"
+# Spec 001b-1 (approved 2026-11-10, proof: `cargo info` + scratch lockfile
+# + `cargo deny` in the real workspace): argon2 for Argon2id PIN hashing
+# (07 line 11). Pure Rust, MIT OR Apache-2.0, rust-version 1.85. Default
+# features (alloc, getrandom, password-hash) give the PHC string format.
+# Exact pin; never bump as a side effect.
+argon2 = "0.6.0"
 shopcore-domain = { path = "crates/domain", version = "0.1.0" }
 shopcore-core = { path = "crates/core", version = "0.1.0" }
 shopcore-protocol = { path = "crates/protocol", version = "0.1.0" }

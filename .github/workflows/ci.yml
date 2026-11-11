@@ -65,6 +65,13 @@ jobs:
       - name: Run just check
         run: just check
 
+      # Spec 001b-1 req. 11: the dev seed is behind the `dev-seed` cargo
+      # feature. This runs the seed integration test (fresh DB → usable
+      # till) with the feature on. The release-absence half of the test
+      # lives in the build-windows job (grep of the release binary).
+      - name: Run dev-seed tests
+        run: cargo nextest run -p shopcore-core --features dev-seed --test seed
+
       - name: Check generated types are fresh
         run: |
           just gen-types
@@ -148,6 +155,17 @@ jobs:
 
       - name: Build Windows app
         run: just build
+
+      # Spec 001b-1 req. 11 (release-absence test): the dev seed is behind
+      # the `dev-seed` cargo feature, which no release profile enables.
+      # The seed marker string (SHOPCORE_DEV_SEED_MARKER_V1) exists only
+      # in the seed module — if it is found in the release binary, the
+      # feature leaked into a release build and this step fails.
+      - name: Verify dev-seed marker is absent from release binary
+        run: |
+          $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes("target/release/shopcore-desktop.exe"))
+          if ($text.Contains("SHOPCORE_DEV_SEED_MARKER_V1")) { throw "dev-seed marker found in release binary — the dev-seed feature leaked into a release build" }
+          Write-Host "dev-seed marker absent from release binary"
 
       - name: Upload Windows exe + installer
         uses: actions/upload-artifact@v4

@@ -14,19 +14,28 @@
 - IDs are client-generated, so offline creation and idempotent sync are free.
 
 ## Key tables (columns abbreviated)
-- `item`, `sku` (item_id, code, name, base_uom_id, tax_group_id, track_batch, active), `barcode` (sku_id, code UNIQUE per tenant, is_primary, pack_qty_milli).
+- `branch` (code UNIQUE per tenant, name), `terminal` (branch_id, code UNIQUE per tenant+branch, name).
+- `item`, `sku` (item_id, code, name, base_uom_id, tax_group_id, track_batch, active), `barcode` (sku_id, code UNIQUE per tenant, is_primary, pack_qty_milli), `uom` (code, name).
+- `tax_group` (code, name), `tax_rate` (tax_group_id, rate_bp, valid_from/to).
 - `price_list`, `price_list_entry` (sku_id, price_e4, valid_from/to).
-- `sale` (branch_id, terminal_id, shift_id, receipt_no UNIQUE, status, customer_id, totals *_minor, completed_at), `sale_line` (sku_id, qty_milli, unit_price_e4, discount_minor, tax_minor, total_minor, promo_json), `sale_payment` (method, amount_minor, reference).
+- `sale` (branch_id, terminal_id, shift_id, receipt_no UNIQUE, status, customer_id, draft_id UNIQUE — the idempotency key for `complete_sale_cash`, totals *_minor, completed_at), `sale_line` (sku_id, qty_milli, unit_price_e4, discount_minor, tax_minor, total_minor, promo_json), `sale_payment` (method, amount_minor, reference), `sale_line_tax` (sale_line_id, tax_rate_id, tax_minor, rate_bp — one row per tax component per line).
+- `draft_sale` (branch_id, terminal_id, shift_id, user_id, status), `draft_line` (draft_sale_id, sku_id, qty_milli, unit_price_e4, discount_minor).
 - `stock_movement` (branch_id, sku_id, batch_id, type, qty_milli, unit_cost_e4, ref_type, ref_id, occurred_at) — append-only.
-- `stock_balance` (branch_id, sku_id, qty_milli, avg_cost_e4) PK (branch_id, sku_id).
-- `shift`, `cash_movement`, `customer`, `customer_ledger`, `supplier`, `purchase_order`, `goods_receipt`, `stocktake`, `transfer`.
+- `stock_balance` (branch_id, sku_id, qty_milli, avg_cost_e4) PK (tenant_id, branch_id, sku_id).
+- `shift` (branch_id, terminal_id, opened_by_user_id, closed_by_user_id, status, opened_at, closed_at), `cash_movement`, `customer`, `customer_ledger`, `supplier`, `purchase_order`, `goods_receipt`, `stocktake`, `transfer`.
+- `user` (username UNIQUE per tenant, pin_hash — Argon2id PHC string, role_id, failed_attempts, locked_until), `role` (name, permissions_json, max_line_discount_bps).
+- `settings` (scope, scope_id, key, value — UNIQUE per tenant+scope+scope_id+key; scopes: tenant / branch / terminal; holds tenant currency + exponent, cash-rounding granularity default OFF, tax defaults, active price list, PIN lockout config, and the catalog version counter `tenant/catalog.version`).
+- `receipt_counter` (terminal_id, date, last_seq — UNIQUE per tenant+terminal+date; updated INSIDE the sale transaction in 001b-2, never on its own).
+- `print_job` (terminal_id, sale_id, payload_json — the semantic `PrintDoc`, status, attempts).
 - Aggregates: `daily_sales_summary`, `daily_item_sales`, `daily_cash_summary`.
-- `audit_log` (user_id, action, entity, entity_id, before_json, after_json, reason, at) — append-only.
+- `audit_log` (terminal_id, user_id, action, entity, entity_id, before_json, after_json, reason, at, prev_hash, row_hash — append-only; the hash chain is per terminal, `row_hash = SHA-256(prev_hash || canonical field encoding in fixed order)`).
 - `outbox` (id, entity, payload, created_at, sent_at, attempts), `sync_state` (cursor per stream).
+
+Append-only enforcement (001b-1): SQLite triggers forbid UPDATE/DELETE on `stock_movement`, `audit_log`, and on COMPLETED `sale` / `sale_line` / `sale_payment` rows. Draft rows (`draft_sale` / `draft_line`) stay editable until the sale completes; once completed, the sale's rows are immutable. The catalog version counter (`settings[tenant/catalog.version]`) is bumped by a trigger on every INSERT/UPDATE/DELETE on a catalog table — the in-memory prefix index rebuilds whenever the counter moves, so a stale index is never served.
 
 ## Indexes (non-negotiable ones)
 - `barcode(tenant_id, code)` unique; `sku(tenant_id, code)`; `sale(branch_id, completed_at)`; `sale_line(sale_id)`; `sale_line(sku_id, sale_id)` for item history; `stock_movement(branch_id, sku_id, occurred_at)`; `outbox(sent_at) WHERE sent_at IS NULL` partial index.
-- Product search: FTS5 over `name`, `code`, barcodes, brand with prefix index; plus an in-memory index of hot SKUs (see `05-performance-budgets`).
+- Product search: FTS5 over `name`, `code`, barcodes only (no brand — dropped in 001b-1) with prefix index; plus an in-memory index of hot SKUs (see `05-performance-budgets`).
 - Every list query must use keyset pagination on an indexed column. `EXPLAIN QUERY PLAN` check in CI for hot queries (no table scans).
 
 ## Aggregates and balances

@@ -14,8 +14,21 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+argon2 = { workspace = true }
+rusqlite = { workspace = true }
 shopcore-domain = { workspace = true }
 shopcore-protocol = { workspace = true }
+shopcore-db = { path = "../db", version = "0.1.0" }
+
+[features]
+# Dev seed (spec 001b-1 req. 11): the dev-seed code (seed data + marker)
+# is compiled ONLY with this feature. No release profile enables it; CI
+# greps the release binary for the seed marker (see .github/workflows).
+dev-seed = []
+
+[dev-dependencies]
+tokio = { workspace = true }
+shopcore-db = { path = "../db", version = "0.1.0" }
 
 [lints]
 workspace = true

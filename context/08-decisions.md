@@ -154,6 +154,25 @@ dev); every other directive is identical to production, and `devCsp`
 never allows `'unsafe-inline'` in `script-src` or `default-src`
 (enforced by the CSP test in `apps/ui/src/test/csp.test.ts`).
 
+## ADR-032 — Argon2id PIN parameters: OWASP minimum kept. Accepted 2026-11-11
+PIN hashing is Argon2id (`argon2` 0.6.0, PHC string format) with the OWASP
+minimum parameters: 19 MiB memory, 2 iterations, 1 lane, Argon2 version
+0x13. Measured verification time on the dev VM (mean over 5 runs, after
+one warm-up run, `crates/core/src/pin.rs::measure_verify_time`):
+- Release (the shipping till): **53–91 ms** across two runs.
+- Debug: **~1,765 ms** — debug codegen is ~30x slower and is not the
+shipping artifact; the debug test bound is a 5 s sanity bound only, the
+release bound is 1 s.
+
+Decision: KEEP the OWASP minimum — no weakening. A PIN verification
+happens once per sign-in / manager approval, never on the scan path, and
+~50–90 ms is unnoticeable there. Verification always runs OFF the UI
+thread (`verify_pin_async` → `tokio::task::spawn_blocking`); the lockout
+(5 failures → 5 minutes, configurable via `settings`) and the dummy-hash
+run for unknown usernames cost one verification each by design. If a
+future target PC measures materially slower, the trade-off (lower memory
+vs longer lockout) is recorded here first — never silently weakened.
+
 ## ADR-009 assessment (spec 005, 2026-11-10) — KEEP
 The spike's 12 chaos tests all pass against a real Postgres (local) — duplicate delivery, out-of-order batches, connection drop, server restart, clock skew, two tills selling the last unit, upgrade with unsent outbox, snapshot interrupt/resume, full-history replay (byte-identical, unique constraint proven to fire), per-field LWW merge, gap detector, revalidation stub. No chaos test exposed a protocol design flaw, so the stop condition did not trigger. ADR-009 (custom outbox/inbox sync, not generic CRDT) is KEPT for Phase 5. Two notes for Phase 5: (1) the per-tenant sequence lock serializes batches per tenant — under high concurrency this is a throughput ceiling to measure; (2) the snapshot catalog is the set of SKUs the server has seen (via movements/price entries), not the full 500k-SKU catalog — the full-catalog snapshot is the manual target-PC run.
 

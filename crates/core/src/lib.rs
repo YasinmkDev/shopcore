@@ -6,10 +6,22 @@
 //! directly. Cross-module calls go through use cases, not shared table
 //! access (see `context/03-architecture.md`).
 //!
-//! Spec 000: this crate is a seam only — it exposes `ping()`. Use cases,
-//! the `DB` actor, and the sync engine land in later specs.
+//! Spec 000: this crate is a seam only — it exposes `ping()`. Spec 001a
+//! lands the domain re-exports. Spec 001b-1 lands the foundation: the
+//! `DB` actor (in `shopcore-db`), search/lookup, users/roles/PIN,
+//! permissions, settings, and the dev seed.
 
-use shopcore_protocol::Pong;
+pub mod error;
+pub mod permissions;
+pub mod pin;
+pub mod search;
+#[cfg(feature = "dev-seed")]
+pub mod seed;
+pub mod settings;
+pub mod users;
+
+pub use error::CoreError;
+pub use shopcore_protocol::Pong;
 
 /// Proves the UI → core round-trip. Not business logic.
 #[must_use]
