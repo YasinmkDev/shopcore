@@ -1,18 +1,18 @@
 {
   "version": 1,
-  "machine": "Intel(R) Xeon(R) Platinum 8321HC CPU @ 1.40GHz / 7935 MiB RAM / linux",
+  "machine": "AMD EPYC 9D25 126-Core Processor / 7934 MiB RAM / linux",
   "metrics": {
-    "3 keyset page (depth 10%) :: 200 rows by keyset": 0.415,
-    "1 barcode-lookup (cold) :: first lookup on a fresh connection": 4.536323,
-    "2 name-search (FTS5) :: prefix search, top 20": 0.118,
-    "2 hot-index build :: build sorted index of active SKUs": 6.163561,
-    "3 keyset page (depth 50%) :: 200 rows by keyset": 0.519,
-    "4 sale-commit (mirrored schema) :: 6-line sale, one transaction, synchronous=FULL": 41.055,
-    "5 sale-commit under load :: 6-line sale while sync writer + report run": 41.823,
-    "6 report (aggregates) :: 90-day sales from daily_sales_summary": 0.064762,
-    "9 memory :: runner peak RSS": 10.39453125,
-    "6 report (raw sale_line) :: same range scanned from raw lines (why aggregates exist)": 2144.380726,
-    "1 barcode-lookup (warm) :: single indexed lookup": 0.018,
-    "3 keyset page (depth 0) :: 200 rows by keyset": 0.217
+    "3 keyset page (depth 50%) :: 200 rows by keyset": 0.097,
+    "9 memory :: runner peak RSS": 10.55859375,
+    "2 hot-index build :: build sorted index of active SKUs": 2.6613119999999997,
+    "5 sale-commit under load :: 6-line sale while sync writer + report run": 30.527,
+    "6 report (aggregates) :: 90-day sales from daily_sales_summary": 0.043495000000000006,
+    "3 keyset page (depth 10%) :: 200 rows by keyset": 0.104,
+    "1 barcode-lookup (fresh connection) :: first lookup on a fresh connection — OS page cache NOT dropped (true cold read needs root on Linux, or a reboot / admin cache-drop tool on Windows); this is a warm-cache lookup": 0.040080000000000005,
+    "1 barcode-lookup (warm) :: single indexed lookup": 0.006,
+    "6 report (raw sale_line) :: same range scanned from raw lines (why aggregates exist)": 130.21797600000002,
+    "4 sale-commit (real schema) :: 6-line sale, one transaction, synchronous=FULL": 28.975,
+    "2 name-search (FTS5) :: prefix search, top 20": 0.108,
+    "3 keyset page (depth 0) :: 200 rows by keyset": 0.103
   }
 }

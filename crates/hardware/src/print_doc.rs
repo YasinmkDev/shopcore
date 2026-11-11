@@ -9,9 +9,12 @@
 //! Money is `i64` minor units; prices are `i64` at scale 10^4 (the
 //! domain `UnitPrice`); quantities are milli-units (the domain `Qty`).
 //! No floats anywhere.
+//!
+//! `serde` derives (001b-2): the print queue stores the document as JSON
+//! in `print_job.payload_json`, so the document must serialize.
 
 /// One receipt, as content.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrintDoc {
     /// Header lines (shop name, branch, address, receipt number, date).
     pub header: Vec<String>,
@@ -33,7 +36,7 @@ pub struct PrintDoc {
 }
 
 /// One sold line on the receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrintLine {
     /// Item/SKU display name.
     pub name: String,
@@ -46,7 +49,7 @@ pub struct PrintLine {
 }
 
 /// One payment on the receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrintPayment {
     /// Payment method display name (e.g. `"Cash"`).
     pub method: String,

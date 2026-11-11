@@ -22,8 +22,6 @@ pub struct DatasetSize {
     pub active_skus: u64,
     /// Barcodes (about 1.2 per SKU).
     pub barcodes: u64,
-    /// Customers.
-    pub customers: u64,
     /// Sales; each sale carries 1–8 lines.
     pub sales: u64,
     /// Sale lines (derived from `sales`, kept as a target, not a promise).
@@ -34,14 +32,14 @@ pub struct DatasetSize {
 
 impl DatasetSize {
     /// Spec 002 full dataset: 500k SKUs (100k active), 600k barcodes,
-    /// 100k customers, ~1.2M sales / 5M lines, 2M movements.
+    /// ~1.2M sales / 5M lines, 2M movements. (No `customer` table in
+    /// the real schema — seeded sales have `customer_id` NULL.)
     #[must_use]
     pub const fn full() -> Self {
         Self {
             skus: 500_000,
             active_skus: 100_000,
             barcodes: 600_000,
-            customers: 100_000,
             sales: 1_200_000,
             sale_lines: 5_000_000,
             movements: 2_000_000,
@@ -55,7 +53,6 @@ impl DatasetSize {
             skus: 10_000,
             active_skus: 2_000,
             barcodes: 12_000,
-            customers: 2_000,
             sales: 24_000,
             sale_lines: 100_000,
             movements: 40_000,
@@ -69,7 +66,6 @@ impl DatasetSize {
             skus: 100,
             active_skus: 20,
             barcodes: 120,
-            customers: 20,
             sales: 240,
             sale_lines: 1_000,
             movements: 400,
@@ -84,8 +80,6 @@ pub struct SeedStats {
     pub skus: u64,
     /// Barcodes inserted.
     pub barcodes: u64,
-    /// Customers inserted.
-    pub customers: u64,
     /// Sales inserted.
     pub sales: u64,
     /// Sale lines inserted.
@@ -196,8 +190,11 @@ struct GeneratedLine {
 struct GeneratedSale {
     completed_at: i64,
     day: String,
-    customer: String,
     lines: Vec<GeneratedLine>,
+    /// Net (line totals minus their tax) — the sale's `subtotal_minor`.
+    subtotal_minor: i64,
+    /// Sum of the lines' tax — the sale's `tax_minor`.
+    tax_minor: i64,
     total_minor: i64,
 }
 
@@ -205,10 +202,10 @@ fn generate_sale(rng: &mut StdRng, size: &DatasetSize) -> GeneratedSale {
     let day_offset = i64::from(rng.random_range(0..90));
     let completed_at = NOW_MS - day_offset * DAY_MS;
     let day = format!("day-{}", 90 - day_offset);
-    let customer = format!("cust-{}", rng.random_range(0..size.customers));
     let line_count = rng.random_range(1..=8);
     let mut lines = Vec::new();
     let mut total_minor: i64 = 0;
+    let mut tax_minor: i64 = 0;
     for _ in 0..line_count {
         let sku_i = rng.random_range(0..size.skus);
         let qty_milli: i64 = i64::from(rng.random_range(1..=5) * 1000);
@@ -216,6 +213,7 @@ fn generate_sale(rng: &mut StdRng, size: &DatasetSize) -> GeneratedSale {
         let line_total = qty_milli * unit_price_e4 / 10_000;
         let tax = line_total * 18 / 118;
         total_minor += line_total;
+        tax_minor += tax;
         lines.push(GeneratedLine {
             sku_i,
             qty_milli,
@@ -227,8 +225,9 @@ fn generate_sale(rng: &mut StdRng, size: &DatasetSize) -> GeneratedSale {
     GeneratedSale {
         completed_at,
         day,
-        customer,
         lines,
+        subtotal_minor: total_minor - tax_minor,
+        tax_minor,
         total_minor,
     }
 }
@@ -263,7 +262,6 @@ pub fn seed(
     // phase commits in whole batches, so the count is the resume point.
     let have_skus = existing_count(conn, "sku")?.min(size.skus);
     let have_barcodes = existing_count(conn, "barcode")?.min(size.barcodes);
-    let have_customers = existing_count(conn, "customer")?.min(size.customers);
     let have_sales = existing_count(conn, "sale")?.min(size.sales);
     let have_lines = existing_count(conn, "sale_line")?;
     let have_movements = existing_count(conn, "stock_movement")?;
@@ -277,32 +275,51 @@ pub fn seed(
              the database was modified outside the seeder; re-seed with --fresh"
         )));
     }
-    let resumed = have_skus > 0 || have_barcodes > 0 || have_customers > 0 || have_sales > 0;
+    let resumed = have_skus > 0 || have_barcodes > 0 || have_sales > 0;
     if resumed {
         println!(
             "resuming seed: {have_skus} skus, {have_barcodes} barcodes, \
-             {have_customers} customers, {have_sales} sales already present"
+             {have_sales} sales already present"
         );
     }
 
-    // SKUs + FTS rows, in batches. sku_name consumes one RNG draw per
-    // SKU, so it is called for every index — replaying the draw for
-    // skipped rows keeps the stream aligned.
+    // Tax group + rate (the real schema's `sale_line_tax` rows reference
+    // a `tax_rate`; every seeded `SKU` is in the `STD` 18% group).
+    // `INSERT OR IGNORE` so a resume does not fail on the UNIQUE key.
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO tax_group (id, tenant_id, code, name, created_at, updated_at, version) \
+         VALUES ('tax-std', 'bench-tenant', 'STD', 'Standard 18%', 0, 0, 1); \
+         INSERT OR IGNORE INTO tax_rate (id, tenant_id, tax_group_id, rate_bp, created_at, updated_at, version) \
+         VALUES ('taxrate-std-18', 'bench-tenant', 'tax-std', 1800, 0, 0, 1);",
+    )
+    .map_err(BenchError::Sql)?;
+
+    // SKUs + their `item` rows, in batches. The real `sku` has a
+    // NOT NULL `item_id` FK, so each `SKU` gets an `item` first.
+    // `sku_name` consumes one RNG draw per SKU, so it is called for
+    // every index — replaying the draw for skipped rows keeps the
+    // stream aligned. The FTS5 table is NOT written here: the 001b-1
+    // triggers maintain `sku_fts` (and the catalog-version setting)
+    // on every `sku`/`barcode` insert.
     {
         let mut i = 0u64;
         while i < size.skus {
             let end = (i + SEED_BATCH).min(size.skus);
             let tx = conn.transaction().map_err(BenchError::Sql)?;
             {
-                let mut sku = tx
+                let mut item = tx
                     .prepare(
-                        "INSERT INTO sku (id, tenant_id, code, name, base_uom_id, \
+                        "INSERT INTO item (id, tenant_id, code, name, base_uom_id, \
                          tax_group_id, track_batch, active, created_at, updated_at, version) \
-                         VALUES (?1, ?2, ?3, ?4, 'each', 'std', 0, ?5, 0, 0, 1)",
+                         VALUES (?1, ?2, ?3, ?4, 'each', 'tax-std', 0, ?5, 0, 0, 1)",
                     )
                     .map_err(BenchError::Sql)?;
-                let mut fts = tx
-                    .prepare("INSERT INTO sku_fts (name, code) VALUES (?1, ?2)")
+                let mut sku = tx
+                    .prepare(
+                        "INSERT INTO sku (id, tenant_id, item_id, code, name, base_uom_id, \
+                         tax_group_id, track_batch, active, created_at, updated_at, version) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, 'each', 'tax-std', 0, ?6, 0, 0, 1)",
+                    )
                     .map_err(BenchError::Sql)?;
                 for j in i..end {
                     let name = sku_name(&mut rng, j);
@@ -311,9 +328,17 @@ pub fn seed(
                     }
                     let code = format!("SKU-{j:06}");
                     let active = j < size.active_skus;
-                    sku.execute(params![format!("sku-{j}"), TENANT, code, name, active])
+                    item.execute(params![format!("item-{j}"), TENANT, code, name, active])
                         .map_err(BenchError::Sql)?;
-                    fts.execute(params![name, code]).map_err(BenchError::Sql)?;
+                    sku.execute(params![
+                        format!("sku-{j}"),
+                        TENANT,
+                        format!("item-{j}"),
+                        code,
+                        name,
+                        active
+                    ])
+                    .map_err(BenchError::Sql)?;
                 }
             }
             tx.commit().map_err(BenchError::Sql)?;
@@ -360,38 +385,7 @@ pub fn seed(
         stats.barcodes = size.barcodes;
     }
 
-    // Customers (no RNG).
-    {
-        let mut i = 0u64;
-        while i < size.customers {
-            let end = (i + SEED_BATCH).min(size.customers);
-            let tx = conn.transaction().map_err(BenchError::Sql)?;
-            {
-                let mut ins = tx
-                    .prepare(
-                        "INSERT INTO customer (id, tenant_id, name, created_at, updated_at, version) \
-                         VALUES (?1, ?2, ?3, 0, 0, 1)",
-                    )
-                    .map_err(BenchError::Sql)?;
-                for j in i..end {
-                    if j < have_customers {
-                        continue;
-                    }
-                    ins.execute(params![
-                        format!("cust-{j}"),
-                        TENANT,
-                        format!("Customer {j}")
-                    ])
-                    .map_err(BenchError::Sql)?;
-                }
-            }
-            tx.commit().map_err(BenchError::Sql)?;
-            i = end;
-        }
-        stats.customers = size.customers;
-    }
-
-    // Sales + lines + payments + movements + aggregates, in batches.
+    // Sales + lines + tax rows + payments + movements + aggregates, in batches.
     // 90 days of history; `completed_at` is epoch ms.
     // Line/movement IDs continue from the existing counts, so a resume
     // never reuses an ID. The RNG is replayed for already-seeded sales
@@ -421,9 +415,11 @@ pub fn seed(
             let mut sale = tx
                 .prepare(
                     "INSERT INTO sale (id, branch_id, terminal_id, shift_id, receipt_no, \
-                     status, customer_id, total_minor, completed_at, tenant_id, \
+                     status, customer_id, draft_id, subtotal_minor, discount_minor, \
+                     tax_minor, total_minor, completed_at, tenant_id, \
                      created_at, updated_at, version) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, 'completed', ?6, ?7, ?8, ?9, 0, 0, 1)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'completed', NULL, NULL, ?6, 0, \
+                     ?7, ?8, ?9, ?10, 0, 0, 1)",
                 )
                 .map_err(BenchError::Sql)?;
             let mut line = tx
@@ -431,6 +427,16 @@ pub fn seed(
                     "INSERT INTO sale_line (id, sale_id, sku_id, qty_milli, unit_price_e4, \
                      discount_minor, tax_minor, total_minor, tenant_id, created_at, \
                      updated_at, version) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, 0, 0, 1)",
+                )
+                .map_err(BenchError::Sql)?;
+            // One `sale_line_tax` row per line (the real sale writes
+            // one per tax component, in group order — here a single
+            // 18% component per line).
+            let mut line_tax = tx
+                .prepare(
+                    "INSERT INTO sale_line_tax (id, tenant_id, sale_line_id, tax_rate_id, \
+                     tax_minor, rate_bp, created_at, updated_at, version) \
+                     VALUES (?1, ?2, ?3, 'taxrate-std-18', ?4, 1800, 0, 0, 1)",
                 )
                 .map_err(BenchError::Sql)?;
             let mut pay = tx
@@ -450,15 +456,35 @@ pub fn seed(
                 .map_err(BenchError::Sql)?;
             let mut agg = tx
                 .prepare(
-                    "INSERT INTO daily_sales_summary (day, branch_id, total_minor, sale_count, tenant_id) \
-                     VALUES (?1, ?2, ?3, 1, ?4) \
-                     ON CONFLICT(day, branch_id) DO UPDATE SET \
+                    "INSERT INTO daily_sales_summary (id, tenant_id, branch_id, date, \
+                     sale_count, subtotal_minor, discount_minor, tax_minor, total_minor, \
+                     created_at, updated_at, version) \
+                     VALUES (?1, ?2, ?3, ?4, 1, ?5, 0, ?6, ?7, 0, 0, 1) \
+                     ON CONFLICT(tenant_id, branch_id, date) DO UPDATE SET \
+                     subtotal_minor = subtotal_minor + excluded.subtotal_minor, \
+                     tax_minor = tax_minor + excluded.tax_minor, \
                      total_minor = total_minor + excluded.total_minor, \
                      sale_count = sale_count + 1",
                 )
                 .map_err(BenchError::Sql)?;
             for s in done..end {
                 let g = generate_sale(&mut rng, size);
+                // The sale FIRST: `sale_line.sale_id` references
+                // `sale(id)` (a real FK — the throwaway schema had
+                // none, so lines could precede the sale there).
+                sale.execute(params![
+                    format!("sale-{s}"),
+                    BRANCH,
+                    TERMINAL,
+                    SHIFT,
+                    format!("R-{s:08}"),
+                    g.subtotal_minor,
+                    g.tax_minor,
+                    g.total_minor,
+                    g.completed_at,
+                    TENANT
+                ])
+                .map_err(BenchError::Sql)?;
                 for l in &g.lines {
                     line.execute(params![
                         format!("line-{sale_lines}"),
@@ -471,6 +497,14 @@ pub fn seed(
                         TENANT
                     ])
                     .map_err(BenchError::Sql)?;
+                    line_tax
+                        .execute(params![
+                            format!("slt-{sale_lines}"),
+                            TENANT,
+                            format!("line-{sale_lines}"),
+                            l.tax
+                        ])
+                        .map_err(BenchError::Sql)?;
                     // Sale-movement IDs share the line counter, not the
                     // total movement counter: receipts (generated after
                     // the sales) occupy the high IDs, so a resume that
@@ -490,18 +524,6 @@ pub fn seed(
                     sale_lines += 1;
                     movements += 1;
                 }
-                sale.execute(params![
-                    format!("sale-{s}"),
-                    BRANCH,
-                    TERMINAL,
-                    SHIFT,
-                    format!("R-{s:08}"),
-                    g.customer,
-                    g.total_minor,
-                    g.completed_at,
-                    TENANT
-                ])
-                .map_err(BenchError::Sql)?;
                 pay.execute(params![
                     format!("pay-{s}"),
                     format!("sale-{s}"),
@@ -509,8 +531,16 @@ pub fn seed(
                     TENANT
                 ])
                 .map_err(BenchError::Sql)?;
-                agg.execute(params![g.day, BRANCH, g.total_minor, TENANT])
-                    .map_err(BenchError::Sql)?;
+                agg.execute(params![
+                    format!("dss-{}", g.day),
+                    TENANT,
+                    BRANCH,
+                    g.day,
+                    g.subtotal_minor,
+                    g.tax_minor,
+                    g.total_minor
+                ])
+                .map_err(BenchError::Sql)?;
             }
             done = end;
         }
@@ -560,11 +590,13 @@ pub fn seed(
 
     // Stock balances from the movements ledger (one row per SKU touched).
     // INSERT OR REPLACE makes this idempotent: a resume just recomputes it.
+    // The real `stock_balance` has an `id` column and its PK is
+    // (tenant_id, branch_id, sku_id) — the id is derived from the SKU.
     conn.execute_batch(
         "INSERT OR REPLACE INTO stock_balance \
-         (branch_id, sku_id, qty_milli, avg_cost_e4, tenant_id, created_at, updated_at, version) \
-         SELECT branch_id, sku_id, SUM(qty_milli), 100, tenant_id, 0, 0, 1 \
-         FROM stock_movement GROUP BY branch_id, sku_id;",
+         (id, tenant_id, branch_id, sku_id, qty_milli, avg_cost_e4, created_at, updated_at, version) \
+         SELECT 'bal-' || sku_id, tenant_id, branch_id, sku_id, SUM(qty_milli), 100, 0, 0, 1 \
+         FROM stock_movement GROUP BY tenant_id, branch_id, sku_id;",
     )
     .map_err(BenchError::Sql)?;
 
@@ -583,14 +615,9 @@ pub fn seed(
 /// Returns [`BenchError::Sql`] if any count query fails.
 pub fn checksum(conn: &Connection) -> Result<String, BenchError> {
     let mut parts: Vec<String> = Vec::new();
-    for table in [
-        "sku",
-        "barcode",
-        "customer",
-        "sale",
-        "sale_line",
-        "stock_movement",
-    ] {
+    // No `customer` table in the real schema (seeded sales have
+    // `customer_id` NULL).
+    for table in ["sku", "barcode", "sale", "sale_line", "stock_movement"] {
         let count: i64 = conn
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
                 row.get(0)

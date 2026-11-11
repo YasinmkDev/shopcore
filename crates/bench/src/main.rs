@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use shopcore_bench::report::{Baseline, MachineRecord, Results, ScenarioResult};
 use shopcore_bench::scenarios;
-use shopcore_bench::{BenchError, schema, seed};
+use shopcore_bench::{BenchError, real_schema, seed};
 
 /// ISO-8601 UTC timestamp, computed from the Unix epoch without a date
 /// library (civil-from-days algorithm).
@@ -210,15 +210,14 @@ fn cmd_seed(args: &Args) -> Result<(), BenchError> {
         }
     }
     let mut conn = rusqlite::Connection::open(&db).map_err(BenchError::Sql)?;
-    schema::create_schema(&conn)?;
+    real_schema::create_schema(&mut conn)?;
     let stats = seed::seed(&mut conn, &size, seed_value)?;
     let db_bytes = std::fs::metadata(&db).map_or(0, |m| m.len());
     println!(
-        "seeded {}: {} skus, {} barcodes, {} customers, {} sales, {} lines, {} movements in {} ms (db {} bytes)",
+        "seeded {}: {} skus, {} barcodes, {} sales, {} lines, {} movements in {} ms (db {} bytes)",
         db.display(),
         stats.skus,
         stats.barcodes,
-        stats.customers,
         stats.sales,
         stats.sale_lines,
         stats.movements,

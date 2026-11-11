@@ -9,9 +9,9 @@
 //! (spec 002 review, 2026-11-10: criterion is the wrong tool for
 //! end-to-end scenarios).
 
+pub mod real_schema;
 pub mod report;
 pub mod scenarios;
-pub mod schema;
 pub mod seed;
 
 /// Errors from the bench harness.
@@ -71,13 +71,13 @@ mod tests {
     #[test]
     fn seeder_is_deterministic() {
         let mut first = rusqlite::Connection::open_in_memory().expect("open");
-        crate::schema::create_schema(&first).expect("schema");
+        crate::real_schema::create_schema(&mut first).expect("schema");
         let tiny = crate::seed::DatasetSize::tiny();
         crate::seed::seed(&mut first, &tiny, crate::seed::DEFAULT_SEED).expect("seed");
         let first_sum = crate::seed::checksum(&first).expect("checksum");
 
         let mut second = rusqlite::Connection::open_in_memory().expect("open");
-        crate::schema::create_schema(&second).expect("schema");
+        crate::real_schema::create_schema(&mut second).expect("schema");
         crate::seed::seed(&mut second, &tiny, crate::seed::DEFAULT_SEED).expect("seed");
         let second_sum = crate::seed::checksum(&second).expect("checksum");
 
@@ -204,7 +204,7 @@ mod tests {
         let path = dir.join("load.db");
         {
             let mut conn = rusqlite::Connection::open(&path).expect("open");
-            crate::schema::create_schema(&conn).expect("schema");
+            crate::real_schema::create_schema(&mut conn).expect("schema");
             let tiny = crate::seed::DatasetSize::tiny();
             crate::seed::seed(&mut conn, &tiny, crate::seed::DEFAULT_SEED).expect("seed");
         }
@@ -224,19 +224,22 @@ mod tests {
     // to the value recorded when the harness was built. If the seeder
     // changes, this test fails loudly and the recorded value must be
     // re-issued deliberately (never edited to match a broken seed).
-    // Recorded 2026-11-10 from a fresh smoke seed.
+    // Re-issued 2026-11-11 (spec 001b-2 real-schema switch): the
+    // `customer` RNG draw was removed (no `customer` table in the real
+    // schema), so the stream — and the sale/line sums — changed.
+    // Recorded 2026-11-10 from a fresh smoke seed (superseded).
     #[test]
     fn smoke_seed_checksum_matches_recorded() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open");
-        crate::schema::create_schema(&conn).expect("schema");
+        crate::real_schema::create_schema(&mut conn).expect("schema");
         let smoke = crate::seed::DatasetSize::smoke();
         crate::seed::seed(&mut conn, &smoke, crate::seed::DEFAULT_SEED).expect("seed");
         let sum = crate::seed::checksum(&conn).expect("checksum");
         assert_eq!(
             sum,
-            "sku=10000,barcode=12000,customer=2000,sale=24000,\
-             sale_line=107450,stock_movement=107450,\
-             sale_sum=805632830,line_sum=805632830",
+            "sku=10000,barcode=12000,sale=24000,\
+             sale_line=108019,stock_movement=108019,\
+             sale_sum=806957603,line_sum=806957603",
             "fresh smoke seed checksum must match the recorded dataset"
         );
     }
@@ -246,7 +249,7 @@ mod tests {
     #[test]
     fn verify_passes_on_fresh_seed() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open");
-        crate::schema::create_schema(&conn).expect("schema");
+        crate::real_schema::create_schema(&mut conn).expect("schema");
         let tiny = crate::seed::DatasetSize::tiny();
         crate::seed::seed(&mut conn, &tiny, crate::seed::DEFAULT_SEED).expect("seed");
         let report = crate::seed::verify(&conn).expect("verify");
@@ -268,7 +271,7 @@ mod tests {
     #[test]
     fn seed_resume_is_idempotent() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open");
-        crate::schema::create_schema(&conn).expect("schema");
+        crate::real_schema::create_schema(&mut conn).expect("schema");
         let tiny = crate::seed::DatasetSize::tiny();
         crate::seed::seed(&mut conn, &tiny, crate::seed::DEFAULT_SEED).expect("seed");
         let first = crate::seed::checksum(&conn).expect("checksum");
@@ -280,43 +283,36 @@ mod tests {
         );
     }
 
-    // Resume: a dataset interrupted after the first sales batch, then
-    // re-seeded, must equal a fresh seed of the same size (same
-    // checksum). The interruption is simulated by deleting the last
-    // batch's sales + their lines/movements/payments and recomputing
-    // the daily aggregates from the remaining sales (as a real
-    // interruption would leave them: the deleted batch never
-    // committed, so its aggregate contribution never existed).
-    // Note: movement IDs after a resume can differ from a fresh seed
-    // (receipts interleave), but counts, sums, and balances are
-    // identical — and that is what the checksum proves.
+    // Resume: seed 10k sales, then resume to 10.5k — the resumed
+    // dataset must equal a fresh seed of the same size (same checksum).
+    // `movements: 0` in both sizes: the receipts phase is skipped, so
+    // the only movements are the sale lines' (one per line). The old
+    // DELETE-based interruption simulation cannot work on the real
+    // schema: the append-only triggers forbid deleting completed
+    // sales, so a partial dataset is built by seeding fewer sales.
     #[test]
     fn seed_resume_completes_partial_dataset() {
-        let size = crate::seed::DatasetSize {
+        let partial = crate::seed::DatasetSize {
             skus: 100,
             active_skus: 20,
             barcodes: 120,
-            customers: 20,
-            sales: 10_500,
+            sales: 10_000,
             sale_lines: 47_000,
-            movements: 60_000,
+            movements: 0,
         };
-        // Reference: a fresh, uninterrupted seed.
+        let size = crate::seed::DatasetSize {
+            sales: 10_500,
+            ..partial
+        };
+        // Reference: a fresh, uninterrupted seed of the full size.
         let mut reference = rusqlite::Connection::open_in_memory().expect("open");
-        crate::schema::create_schema(&reference).expect("schema");
+        crate::real_schema::create_schema(&mut reference).expect("schema");
         crate::seed::seed(&mut reference, &size, crate::seed::DEFAULT_SEED).expect("seed");
         let expected = crate::seed::checksum(&reference).expect("checksum");
-        // Interrupted copy: same seed, then delete the last batch
-        // (sales 10000..10500, the second 10k batch) and recompute
-        // the aggregates from the surviving sales.
+        // Interrupted copy: seed only the partial size, then resume.
         let mut conn = rusqlite::Connection::open_in_memory().expect("open");
-        crate::schema::create_schema(&conn).expect("schema");
-        crate::seed::seed(&mut conn, &size, crate::seed::DEFAULT_SEED).expect("seed");
-        conn.execute_batch(
-            "DELETE FROM sale_line WHERE sale_id IN              (SELECT id FROM sale WHERE receipt_no >= 'R-00010000');              DELETE FROM stock_movement WHERE ref_type = 'sale' AND ref_id IN              (SELECT id FROM sale WHERE receipt_no >= 'R-00010000');              DELETE FROM sale_payment WHERE sale_id IN              (SELECT id FROM sale WHERE receipt_no >= 'R-00010000');              DELETE FROM sale WHERE receipt_no >= 'R-00010000';              DELETE FROM daily_sales_summary;              INSERT INTO daily_sales_summary (day, branch_id, total_minor, sale_count, tenant_id)              SELECT 'day-' || (90 - CAST((1790000000000 - completed_at) / 86400000 AS INTEGER)),                branch_id, SUM(total_minor), COUNT(*), tenant_id              FROM sale GROUP BY 1, branch_id, tenant_id;",
-        )
-        .expect("simulate interruption");
-        // Resume: re-seed the same size on the partial dataset.
+        crate::real_schema::create_schema(&mut conn).expect("schema");
+        crate::seed::seed(&mut conn, &partial, crate::seed::DEFAULT_SEED).expect("seed");
         crate::seed::seed(&mut conn, &size, crate::seed::DEFAULT_SEED).expect("resume");
         let got = crate::seed::checksum(&conn).expect("checksum");
         assert_eq!(

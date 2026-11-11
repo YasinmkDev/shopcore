@@ -11,16 +11,24 @@
 //! `DB` actor (in `shopcore-db`), search/lookup, users/roles/PIN,
 //! permissions, settings, and the dev seed.
 
+pub mod audit;
+pub mod draft;
 pub mod error;
 pub mod permissions;
 pub mod pin;
+pub mod sale;
+pub mod scratch;
 pub mod search;
 #[cfg(feature = "dev-seed")]
 pub mod seed;
 pub mod settings;
 pub mod users;
 
+pub use audit::{AuditEvent, verify_audit_chain};
+pub use draft::{DraftCart, DraftLine};
 pub use error::CoreError;
+pub use sale::{CompleteSaleCashInput, SaleCompleted, SaleError};
+pub use scratch::ScratchDb;
 pub use shopcore_protocol::Pong;
 
 /// Proves the UI → core round-trip. Not business logic.

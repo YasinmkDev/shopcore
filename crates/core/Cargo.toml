@@ -16,9 +16,15 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 argon2 = { workspace = true }
 rusqlite = { workspace = true }
+# sha2 is already a workspace dependency (spec 005, snapshot checksums);
+# the audit hash chain (001b-2) uses it. Not a new dependency.
+sha2 = { workspace = true }
 shopcore-domain = { workspace = true }
 shopcore-protocol = { workspace = true }
 shopcore-db = { path = "../db", version = "0.1.0" }
+# Hardware traits + PrintDoc for the print queue (001b-2). Workspace
+# member, not a new external dependency.
+shopcore-hardware = { path = "../hardware", version = "0.1.0" }
 
 [features]
 # Dev seed (spec 001b-1 req. 11): the dev-seed code (seed data + marker)

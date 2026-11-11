@@ -2,8 +2,8 @@
 //!
 //! Times are measured with `Instant` and recorded in a histogram in
 //! microseconds; percentiles are reported in milliseconds. Every scenario
-//! runs against the throwaway bench schema (see `schema.rs`) — scenario 4
-//! is labelled mirrored-schema until the real migrations land (spec 001).
+//! runs against the REAL app schema (001b-1 migrations, see
+//! `real_schema.rs`) since spec 001b-2.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use hdrhistogram::Histogram;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Transaction, params};
 use serde::Deserialize;
 
 use crate::BenchError;
@@ -338,56 +338,121 @@ pub fn scenario_keyset_pages(
     Ok(out)
 }
 
-/// Run one 6-line sale commit (the full write path from `04`).
-/// `run_id` makes every bench row unique per run, so re-running the
-/// scenarios on the same database never hits a UNIQUE constraint, and the
-/// bench aggregate day never touches the seeded aggregates.
+/// Run one 6-line sale commit — the full write path from `04` on the
+/// REAL schema (001b-2): sale, lines, per-component tax rows
+/// (`sale_line_tax`), payment, stock movements + balances, aggregates
+/// (`daily_sales_summary`, `daily_item_sales`, `daily_cash_summary`),
+/// audit, outbox (sale + one stock row per `SKU`), `receipt_counter`,
+/// and the queued `print_job`. `run_id` makes every bench row unique
+/// per run, so re-running the scenarios on the same database never
+/// hits a UNIQUE constraint, and the bench aggregate day never touches
+/// the seeded aggregates.
+///
+/// The sale is the real domain's Exclusive-tax shape: 6 lines of
+/// 1 unit at 1.00 (gross 1000, tax 180 at 18%, total 1180); sale
+/// subtotal 6000, tax 1080, total 7080, tendered in cash.
 fn commit_one_sale(conn: &mut Connection, sale_no: u64, run_id: u64) -> Result<(), BenchError> {
     let tx = conn.transaction().map_err(BenchError::Sql)?;
-    let total_minor: i64 = 6 * 1_000;
+    let total_minor: i64 = 7_080;
     let sale_id = format!("sale-bench-{run_id}-{sale_no}");
     tx.execute(
         "INSERT INTO sale (id, branch_id, terminal_id, shift_id, receipt_no, status, \
-         customer_id, total_minor, completed_at, tenant_id, created_at, updated_at, version) \
+         customer_id, draft_id, subtotal_minor, discount_minor, tax_minor, total_minor, \
+         completed_at, tenant_id, created_at, updated_at, version) \
          VALUES (?1, 'bench-branch', 'bench-terminal', 'bench-shift', ?2, 'completed', \
-         'cust-0', ?3, 1790000000000, 'bench-tenant', 0, 0, 1)",
+         NULL, NULL, 6000, 0, 1080, ?3, 1790000000000, 'bench-tenant', 0, 0, 1)",
         params![sale_id, format!("RB-{run_id}-{sale_no:08}"), total_minor],
     )
     .map_err(BenchError::Sql)?;
     for line in 0..6 {
-        let sku_i = line;
-        tx.execute(
-            "INSERT INTO sale_line (id, sale_id, sku_id, qty_milli, unit_price_e4, \
-             discount_minor, tax_minor, total_minor, tenant_id, created_at, updated_at, version) \
-             VALUES (?1, ?2, ?3, 1000, 10000, 0, 152, 1000, 'bench-tenant', 0, 0, 1)",
-            params![
-                format!("line-bench-{run_id}-{sale_no}-{line}"),
-                sale_id,
-                format!("sku-{sku_i}")
-            ],
-        )
-        .map_err(BenchError::Sql)?;
-        tx.execute(
-            "INSERT INTO stock_movement (id, branch_id, sku_id, batch_id, type, qty_milli, \
-             unit_cost_e4, ref_type, ref_id, occurred_at, tenant_id, created_at, updated_at, version) \
-             VALUES (?1, 'bench-branch', ?2, NULL, 'sale', -1000, 10000, 'sale', ?3, \
-             1790000000000, 'bench-tenant', 0, 0, 1)",
-            params![
-                format!("mov-bench-{run_id}-{sale_no}-{line}"),
-                format!("sku-{sku_i}"),
-                sale_id
-            ],
-        )
-        .map_err(BenchError::Sql)?;
-        tx.execute(
-            "INSERT INTO stock_balance (branch_id, sku_id, qty_milli, avg_cost_e4, tenant_id, \
-             created_at, updated_at, version) VALUES ('bench-branch', ?1, -1000, 10000, \
-             'bench-tenant', 0, 0, 1) \
-             ON CONFLICT(branch_id, sku_id) DO UPDATE SET qty_milli = qty_milli - 1000",
-            params![format!("sku-{sku_i}")],
-        )
-        .map_err(BenchError::Sql)?;
+        commit_sale_line(&tx, &sale_id, sale_no, run_id, line)?;
     }
+    commit_sale_tail(&tx, &sale_id, sale_no, run_id, total_minor)?;
+    tx.commit().map_err(BenchError::Sql)?;
+    Ok(())
+}
+
+/// One line of the bench sale: `sale_line`, its `sale_line_tax` row,
+/// the stock movement + balance, the item aggregate, and the stock
+/// outbox row.
+fn commit_sale_line(
+    tx: &Transaction<'_>,
+    sale_id: &str,
+    sale_no: u64,
+    run_id: u64,
+    line: u64,
+) -> Result<(), BenchError> {
+    let sku = format!("sku-{line}");
+    tx.execute(
+        "INSERT INTO sale_line (id, sale_id, sku_id, qty_milli, unit_price_e4, \
+         discount_minor, tax_minor, total_minor, tenant_id, created_at, updated_at, version) \
+         VALUES (?1, ?2, ?3, 1000, 10000, 0, 180, 1180, 'bench-tenant', 0, 0, 1)",
+        params![
+            format!("line-bench-{run_id}-{sale_no}-{line}"),
+            sale_id,
+            sku
+        ],
+    )
+    .map_err(BenchError::Sql)?;
+    tx.execute(
+        "INSERT INTO sale_line_tax (id, tenant_id, sale_line_id, tax_rate_id, tax_minor, \
+         rate_bp, created_at, updated_at, version) \
+         VALUES (?1, 'bench-tenant', ?2, 'taxrate-std-18', 180, 1800, 0, 0, 1)",
+        params![
+            format!("slt-bench-{run_id}-{sale_no}-{line}"),
+            format!("line-bench-{run_id}-{sale_no}-{line}")
+        ],
+    )
+    .map_err(BenchError::Sql)?;
+    tx.execute(
+        "INSERT INTO stock_movement (id, branch_id, sku_id, batch_id, type, qty_milli, \
+         unit_cost_e4, ref_type, ref_id, occurred_at, tenant_id, created_at, updated_at, version) \
+         VALUES (?1, 'bench-branch', ?2, NULL, 'sale', -1000, 10000, 'sale', ?3, \
+         1790000000000, 'bench-tenant', 0, 0, 1)",
+        params![format!("mov-bench-{run_id}-{sale_no}-{line}"), sku, sale_id],
+    )
+    .map_err(BenchError::Sql)?;
+    tx.execute(
+        "INSERT INTO stock_balance (id, tenant_id, branch_id, sku_id, qty_milli, avg_cost_e4, \
+         created_at, updated_at, version) VALUES (?1, 'bench-tenant', 'bench-branch', ?2, \
+         -1000, 10000, 0, 0, 1) \
+         ON CONFLICT(tenant_id, branch_id, sku_id) DO UPDATE SET qty_milli = qty_milli - 1000",
+        params![format!("bal-bench-{run_id}-{sale_no}-{line}"), sku],
+    )
+    .map_err(BenchError::Sql)?;
+    tx.execute(
+        "INSERT INTO daily_item_sales (id, tenant_id, branch_id, sku_id, date, qty_milli, \
+         total_minor, created_at, updated_at, version) \
+         VALUES (?1, 'bench-tenant', 'bench-branch', ?2, ?3, 1000, 1180, 0, 0, 1) \
+         ON CONFLICT(tenant_id, branch_id, sku_id, date) DO UPDATE SET \
+         qty_milli = qty_milli + 1000, total_minor = total_minor + 1180",
+        params![
+            format!("dis-bench-{run_id}-{sale_no}-{line}"),
+            sku,
+            format!("bench-day-{run_id}")
+        ],
+    )
+    .map_err(BenchError::Sql)?;
+    tx.execute(
+        "INSERT INTO outbox (id, tenant_id, entity, entity_id, payload, created_at, \
+         updated_at, sent_at, attempts, version) \
+         VALUES (?1, 'bench-tenant', 'stock', ?2, '{}', 1790000000000, 1790000000000, \
+         NULL, 0, 1)",
+        params![format!("outbox-stock-bench-{run_id}-{sale_no}-{line}"), sku],
+    )
+    .map_err(BenchError::Sql)?;
+    Ok(())
+}
+
+/// The sale-level rows: payment, daily aggregates, the audit row, the
+/// sale outbox row, the receipt counter, and the queued `print_job`.
+fn commit_sale_tail(
+    tx: &Transaction<'_>,
+    sale_id: &str,
+    sale_no: u64,
+    run_id: u64,
+    total_minor: i64,
+) -> Result<(), BenchError> {
     tx.execute(
         "INSERT INTO sale_payment (id, sale_id, method, amount_minor, reference, tenant_id, \
          created_at, updated_at, version) VALUES (?1, ?2, 'cash', ?3, NULL, 'bench-tenant', 0, 0, 1)",
@@ -399,32 +464,73 @@ fn commit_one_sale(conn: &mut Connection, sale_no: u64, run_id: u64) -> Result<(
     )
     .map_err(BenchError::Sql)?;
     tx.execute(
-        "INSERT INTO daily_sales_summary (day, branch_id, total_minor, sale_count, tenant_id) \
-         VALUES (?1, 'bench-branch', ?2, 1, 'bench-tenant') \
-         ON CONFLICT(day, branch_id) DO UPDATE SET \
+        "INSERT INTO daily_sales_summary (id, tenant_id, branch_id, date, sale_count, \
+         subtotal_minor, discount_minor, tax_minor, total_minor, created_at, updated_at, version) \
+         VALUES (?1, 'bench-tenant', 'bench-branch', ?2, 1, 6000, 0, 1080, ?3, 0, 0, 1) \
+         ON CONFLICT(tenant_id, branch_id, date) DO UPDATE SET \
+         subtotal_minor = subtotal_minor + 6000, tax_minor = tax_minor + 1080, \
          total_minor = total_minor + excluded.total_minor, sale_count = sale_count + 1",
-        params![format!("bench-day-{run_id}"), total_minor],
+        params![
+            format!("dss-bench-{run_id}"),
+            format!("bench-day-{run_id}"),
+            total_minor
+        ],
     )
     .map_err(BenchError::Sql)?;
     tx.execute(
-        "INSERT INTO audit_log (id, user_id, action, entity, entity_id, before_json, \
-         after_json, reason, at, tenant_id) VALUES (?1, 'bench-user', 'sale.create', \
-         'sale', ?2, NULL, NULL, 'bench', 1790000000000, 'bench-tenant')",
+        "INSERT INTO daily_cash_summary (id, tenant_id, branch_id, terminal_id, date, \
+         opening_minor, cash_sales_minor, cash_in_minor, cash_out_minor, expected_minor, \
+         counted_minor, created_at, updated_at, version) \
+         VALUES (?1, 'bench-tenant', 'bench-branch', 'bench-terminal', ?2, 0, ?3, 0, 0, \
+         ?3, NULL, 0, 0, 1) \
+         ON CONFLICT(tenant_id, branch_id, date) DO UPDATE SET \
+         cash_sales_minor = cash_sales_minor + excluded.cash_sales_minor, \
+         expected_minor = expected_minor + excluded.expected_minor",
+        params![
+            format!("dcs-bench-{run_id}"),
+            format!("bench-day-{run_id}"),
+            total_minor
+        ],
+    )
+    .map_err(BenchError::Sql)?;
+    // Synthetic load rows (terminal_id NULL, NULL hashes): the chain
+    // invariant applies to rows the app writes via the audit writer,
+    // not the bench.
+    tx.execute(
+        "INSERT INTO audit_log (id, tenant_id, terminal_id, user_id, action, entity, entity_id, \
+         before_json, after_json, reason, at, prev_hash, row_hash, created_at, updated_at, version) \
+         VALUES (?1, 'bench-tenant', NULL, 'bench-user', 'sale.completed', \
+         'sale', ?2, NULL, NULL, 'bench', 1790000000000, NULL, NULL, 0, 0, 1)",
         params![format!("audit-bench-{run_id}-{sale_no}"), sale_id],
     )
     .map_err(BenchError::Sql)?;
     tx.execute(
-        "INSERT INTO outbox (id, entity, payload, created_at, sent_at, attempts, tenant_id) \
-         VALUES (?1, 'sale', '{}', 1790000000000, NULL, 0, 'bench-tenant')",
-        params![format!("outbox-bench-{run_id}-{sale_no}")],
+        "INSERT INTO outbox (id, tenant_id, entity, entity_id, payload, created_at, \
+         updated_at, sent_at, attempts, version) \
+         VALUES (?1, 'bench-tenant', 'sale', ?2, '{}', 1790000000000, 1790000000000, NULL, 0, 1)",
+        params![format!("outbox-bench-{run_id}-{sale_no}"), sale_id],
     )
     .map_err(BenchError::Sql)?;
-    tx.commit().map_err(BenchError::Sql)?;
+    tx.execute(
+        "INSERT INTO receipt_counter (id, tenant_id, terminal_id, date, last_seq, created_at, \
+         updated_at, version) VALUES (?1, 'bench-tenant', 'bench-terminal', '20261111', 1, 0, 0, 1) \
+         ON CONFLICT(tenant_id, terminal_id, date) DO UPDATE SET last_seq = last_seq + 1",
+        params![format!("rc-bench-{run_id}")],
+    )
+    .map_err(BenchError::Sql)?;
+    tx.execute(
+        "INSERT INTO print_job (id, tenant_id, terminal_id, sale_id, payload_json, status, \
+         attempts, created_at, updated_at, version) \
+         VALUES (?1, 'bench-tenant', 'bench-terminal', ?2, '{}', 'queued', 0, 0, 0, 1)",
+        params![format!("print-bench-{run_id}-{sale_no}"), sale_id],
+    )
+    .map_err(BenchError::Sql)?;
     Ok(())
 }
 
 /// Scenario 4 — sale commit transaction (6 lines, full write path).
-/// Labelled mirrored-schema until the real migrations land (spec 001).
+/// On the REAL schema since 001b-2 (the throwaway mirrored schema was
+/// deleted with the switch).
 ///
 /// # Errors
 /// Returns [`BenchError::Sql`] if any commit fails.
@@ -436,7 +542,7 @@ pub fn scenario_sale_commit(db_path: &Path, run_id: u64) -> Result<ScenarioResul
         commit_one_sale(&mut conn, sale_no, run_id)
     })?;
     Ok(ScenarioResult::from_histogram(
-        "4 sale-commit (mirrored schema)",
+        "4 sale-commit (real schema)",
         "6-line sale, one transaction, synchronous=FULL",
         p50,
         p95,

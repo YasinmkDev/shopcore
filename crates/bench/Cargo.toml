@@ -23,6 +23,10 @@ thiserror.workspace = true
 # session summary): rand 0.10.3, hdrhistogram 7.6.0 — see [workspace.dependencies].
 rand.workspace = true
 hdrhistogram.workspace = true
+# The real app schema (spec 001b-2): the bench runs the 001b-1 migrations
+# via shopcore-db instead of a throwaway mirrored schema. Workspace
+# member, not a new external dependency.
+shopcore-db = { path = "../db", version = "0.1.0" }
 
 [lints]
 workspace = true

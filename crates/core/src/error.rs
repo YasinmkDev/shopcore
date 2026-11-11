@@ -25,4 +25,25 @@ pub enum CoreError {
     /// The caller passed an invalid argument.
     #[error("invalid input: {0}")]
     InvalidInput(String),
+
+    /// The audit hash chain is broken at this row (a field was changed
+    /// after writing, or the `prev_hash` link does not match the
+    /// previous row). Reported by the verify use case, never silently
+    /// repaired.
+    #[error("audit chain broken at row {row_id}: {detail}")]
+    AuditChain {
+        /// The id of the first row whose link does not verify.
+        row_id: String,
+        /// What does not match.
+        detail: String,
+    },
+}
+
+// A `SQLite` failure is a database error: map it to the `Db` variant
+// directly, so `?` on a `rusqlite` call works in one step inside the
+// core use cases (the `#[from]` on `Db` only covers `DbError`).
+impl From<rusqlite::Error> for CoreError {
+    fn from(err: rusqlite::Error) -> Self {
+        Self::Db(shopcore_db::DbError::Sql(err))
+    }
 }
