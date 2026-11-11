@@ -20,13 +20,13 @@ tenant, branch, terminal, user, role, item, sku, barcode, uom, uom_conversion, c
 Order of operations for each sale line:
 1. Start with `unit_price × qty` (from active price list, with promo pricing if applicable) → line gross (rounded to Money).
 2. Apply line discount (percent or fixed; cannot exceed line total).
-3. Allocate bill-level discount across lines proportionally by post-line-discount amount using **largest remainder** (so allocations sum exactly; ties go to the earlier line).
+3. A percent bill discount is a percent of the subtotal after line discounts, rounded once, then allocated across lines proportionally by post-line-discount amount using **largest remainder** (so allocations sum exactly; ties go to the earlier line). Zero-value lines get 0; a percent bill discount on an all-zero cart is 0 (never divides by zero).
 4. Compute tax on the discounted amount per line.
 5. Bill tax = sum of line taxes. Bill total = sum of line totals. No bill-level re-rounding.
 
 Tax modes (per tax group, per tenant default):
 - **Exclusive:** `tax = round(net × rate)`, `total = net + tax`.
-- **Inclusive:** `net = round(gross / (1 + rate))`, `tax = gross − net` (so net + tax always equals the shelf price).
+- **Inclusive:** `net = round(gross / (1 + rate))`, `tax = gross − net` (so net + tax always equals the shelf price). When a discount applies to an inclusive-tax line, the DISCOUNTED GROSS is the gross for this formula: `net = round(discounted_gross / (1 + rate))`, `tax = discounted_gross − net`.
 
 Golden examples (must exist as tests):
 - Exclusive: net 100.00 @18% → tax 18.00, total 118.00.
@@ -34,8 +34,10 @@ Golden examples (must exist as tests):
 - Inclusive rounding: gross 99.99 @18% → net 84.74, tax 15.25 (99.99/1.18 = 84.7373…).
 - Bill discount: lines A 100.00, B 50.00; 10% bill discount = 15.00 → A −10.00, B −5.00; exclusive tax 18% → A tax 16.20, B tax 8.10; net 135.00 + tax 24.30 = total 159.30.
 - Largest remainder: discount 1.00 over three equal lines → 0.34, 0.33, 0.33.
+- Inclusive tax + bill discount: gross 118.00 @18% inclusive with 10% bill discount → discounted gross 106.20, net 90.00, tax 16.20.
+- Multiple taxes: net 0.30 with 5% + 13% → 0.02 + 0.04 = 0.06 (vs 0.05 if the 18% were combined first).
 
-Multiple taxes (compound or additive) are configured per tax group; default additive. Tax-exempt customers/items set tax to 0 with an audit-visible reason.
+Multiple taxes (compound or additive) are configured per tax group; default additive. Each tax component is rounded separately (`tax_i = round(net × rate_i)`); the line tax is the sum of the rounded components. Tax-exempt customers/items set tax to 0 with an audit-visible reason.
 
 ## Promotions (v1)
 Types: percent off item/category, fixed amount off, buy X get Y (cheapest or specified free), bundle price, time-windowed, customer-group restricted. Rules:
@@ -48,7 +50,7 @@ Types: percent off item/category, fixed amount off, buy X get Y (cheapest or spe
 - States: `draft → held → completed`, or `voided`. Completed sales are immutable; corrections happen via returns or reversing documents.
 - Receipt number: `{branch_code}-{terminal_code}-{yyyymmdd}-{seq}` generated locally; unique offline because terminal code is part of it.
 - Payments: cash, card (terminal-handled), wallet, customer credit, other. Split allowed. Change is calculated only on cash. Overpayment on non-cash is rejected.
-- Rounding of cash totals to the nearest 0.05 (or currency minimum coin) is a per-tenant setting, recorded as a separate `cash_rounding` line, never hidden in prices.
+- Cash rounding is DEFAULT OFF (granularity = minor unit, i.e. no rounding). When a tenant turns it ON, rounding applies only to the cash-tendered total after tax, to the nearest granularity (0.05 or the currency minimum coin), recorded as a separate untaxed `cash_rounding` line, never hidden in prices. Goldens (rounding ON): 52.32 → 52.30, 52.33 → 52.35 (granularity 0.05), 52.35 → 52.40 (granularity 0.10).
 - Void (before completion) vs refund/return (after completion). Void of a completed sale is not allowed; use return. Voids and price overrides require the corresponding permission or manager PIN.
 
 ## Returns and exchanges
