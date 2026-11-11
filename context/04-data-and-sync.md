@@ -9,7 +9,7 @@
 ## Conventions
 - Table/column names `snake_case`. Every table: `id` (UUIDv7, TEXT or BLOB), `tenant_id`, `created_at`, `updated_at`, `deleted_at` (nullable), `version` (int, optimistic concurrency), plus `branch_id` where applicable.
 - Money columns end `_minor` (i64). Unit price/cost columns end `_e4`. Quantities end `_milli`. Rates end `_bp`.
-- No floats anywhere. Timestamps stored as UTC ISO-8601 or epoch ms (pick epoch ms; UI formats locally).
+- No floats anywhere. Timestamps are stored as ISO-8601 UTC with a `Z` suffix (e.g. `2026-11-11T08:44:16Z`), which sorts lexicographically in the same order as chronologically. The UI formats locally. (Owner decision 2026-11-11 — supersedes the earlier "pick epoch ms" note. CONFLICT: spec 001b-1 implemented epoch-ms INTEGER columns + `now_ms`; a follow-up must migrate 001b-1 to ISO-8601 TEXT — ADR-031 allows migration rewrites until the first customer install. Do not write new timestamp code in epoch ms.)
 - Migrations: forward-only SQL files, numbered, idempotent, tested against a database from the previous release (customers upgrade in place). Never edit a shipped migration.
 - IDs are client-generated, so offline creation and idempotent sync are free.
 
@@ -31,7 +31,7 @@
 - `audit_log` (terminal_id, user_id, action, entity, entity_id, before_json, after_json, reason, at, prev_hash, row_hash — append-only; the hash chain is per terminal, `row_hash = SHA-256(prev_hash || canonical field encoding in fixed order)`).
 - `outbox` (id, entity, payload, created_at, sent_at, attempts), `sync_state` (cursor per stream).
 
-Append-only enforcement (001b-1): SQLite triggers forbid UPDATE/DELETE on `stock_movement`, `audit_log`, and on COMPLETED `sale` / `sale_line` / `sale_payment` rows. Draft rows (`draft_sale` / `draft_line`) stay editable until the sale completes; once completed, the sale's rows are immutable. The catalog version counter (`settings[tenant/catalog.version]`) is bumped by a trigger on every INSERT/UPDATE/DELETE on a catalog table — the in-memory prefix index rebuilds whenever the counter moves, so a stale index is never served.
+Append-only enforcement (001b-1): SQLite triggers forbid UPDATE/DELETE on `stock_movement`, `audit_log`, and on COMPLETED `sale` / `sale_line` / `sale_payment` rows. Draft rows (`draft_sale` / `draft_line`) stay editable until the sale completes; once completed, the sale's rows are immutable. The catalog version counter (`settings[tenant/catalog.version]`) is bumped by a trigger on every INSERT/UPDATE/DELETE on a catalog table — the in-memory prefix index rebuilds whenever the counter moves, so a stale index is never served. The importer spec MUST measure the catalog-version trigger cost on a 50k-row import (24 triggers fire on every catalog write; a bulk import must not be slowed by them — measure and record the import time with and without the triggers before the importer ships).
 
 ## Indexes (non-negotiable ones)
 - `barcode(tenant_id, code)` unique; `sku(tenant_id, code)`; `sale(branch_id, completed_at)`; `sale_line(sale_id)`; `sale_line(sku_id, sale_id)` for item history; `stock_movement(branch_id, sku_id, occurred_at)`; `outbox(sent_at) WHERE sent_at IS NULL` partial index.
