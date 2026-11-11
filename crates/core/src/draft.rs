@@ -5,7 +5,9 @@
 //! DB (req. 2) — and restored after crash/restart by [`restore_draft`].
 //! The main-DB parts of these use cases (audit rows, PIN verification,
 //! permission checks) go through the `DB` actor, like every other
-//! main-DB access.
+//! main-DB access. Every draft-MUTATING use case writes through
+//! [`ScratchDb::with_conn_write`], which re-arms the checkpoint timer
+//! (ADR-034); reads use `with_conn` and do not.
 //!
 //! Discounts: a line discount is stored on the draft line as an AMOUNT
 //! (`discount_minor`, the 001b-1 schema has no discount-kind column).
@@ -149,7 +151,7 @@ pub fn open_draft(
         status: "open".to_string(),
         lines: Vec::new(),
     };
-    scratch.with_conn(|conn| {
+    scratch.with_conn_write(|conn| {
         conn.execute(
             "INSERT INTO draft_sale (id, tenant_id, branch_id, terminal_id, shift_id, user_id, status, created_at, updated_at, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?7, 1)",
             rusqlite::params![id, tenant_id, branch_id, terminal_id, shift_id, user_id, now_ms],
@@ -229,7 +231,7 @@ pub fn draft_add_line(
     }
     let draft_id = draft_id.to_string();
     let sku_id = sku_id.to_string();
-    scratch.with_conn(|conn| {
+    scratch.with_conn_write(|conn| {
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM draft_sale WHERE id = ?1 AND status = 'open' AND deleted_at IS NULL)",
@@ -326,7 +328,7 @@ pub fn draft_set_qty(
     }
     let draft_id = draft_id.to_string();
     let line_id = line_id.to_string();
-    scratch.with_conn(|conn| {
+    scratch.with_conn_write(|conn| {
         let line: Option<DraftLine> = conn
             .query_row(
                 "SELECT id, sku_id, qty_milli, unit_price_e4, discount_minor FROM draft_line WHERE id = ?1 AND draft_sale_id = ?2 AND deleted_at IS NULL",
@@ -376,7 +378,7 @@ pub fn draft_remove_line(
 ) -> Result<bool, CoreError> {
     let draft_id = draft_id.to_string();
     let line_id = line_id.to_string();
-    scratch.with_conn(|conn| {
+    scratch.with_conn_write(|conn| {
         let line: Option<DraftLine> = conn
             .query_row(
                 "SELECT id, sku_id, qty_milli, unit_price_e4, discount_minor FROM draft_line WHERE id = ?1 AND draft_sale_id = ?2 AND deleted_at IS NULL",
@@ -428,7 +430,7 @@ pub fn draft_restore_line(
     now_ms: i64,
 ) -> Result<bool, CoreError> {
     let draft_id = draft_id.to_string();
-    scratch.with_conn(|conn| {
+    scratch.with_conn_write(|conn| {
         let removed: Option<DraftLine> = conn
             .query_row(
                 "SELECT id, sku_id, qty_milli, unit_price_e4, discount_minor FROM draft_removed_line WHERE draft_sale_id = ?1",
@@ -550,7 +552,7 @@ pub fn draft_apply_discount(
         )?);
     }
     // Apply (replaces any previous discount on the line), then audit.
-    scratch.with_conn(|conn| {
+    scratch.with_conn_write(|conn| {
         conn.execute(
             "UPDATE draft_line SET discount_minor = ?1, updated_at = ?2 WHERE id = ?3 AND draft_sale_id = ?4",
             rusqlite::params![amount_minor, now_ms, line_id, draft_id],
@@ -819,7 +821,7 @@ pub fn draft_cancel(
         )?;
     }
     let draft_id = draft_id.to_string();
-    scratch.with_conn(|conn| {
+    scratch.with_conn_write(|conn| {
         conn.execute(
             "DELETE FROM draft_removed_line WHERE draft_sale_id = ?1",
             rusqlite::params![draft_id],
@@ -925,7 +927,7 @@ pub fn restore_draft(
 /// Delete a draft and its lines + undo slot from the scratch DB.
 fn discard_draft(scratch: &ScratchDb, draft_id: &str) -> Result<(), CoreError> {
     let draft_id = draft_id.to_string();
-    scratch.with_conn(|conn| {
+    scratch.with_conn_write(|conn| {
         conn.execute(
             "DELETE FROM draft_removed_line WHERE draft_sale_id = ?1",
             rusqlite::params![draft_id],

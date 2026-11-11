@@ -37,6 +37,9 @@ jobs:
           toolchain: "1.99.1"
           components: rustfmt, clippy
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
       - name: Install Node 22.23.4
         uses: actions/setup-node@v4
         with:
@@ -102,6 +105,9 @@ jobs:
           toolchain: "1.99.1"
           components: rustfmt, clippy
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
       - name: Install just 1.59.0
         uses: taiki-e/install-action@v2
         with:
@@ -134,6 +140,9 @@ jobs:
         with:
           toolchain: "1.99.1"
           components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Install Node 22.23.4
         uses: actions/setup-node@v4
@@ -209,6 +218,9 @@ jobs:
           toolchain: "1.99.1"
           components: rustfmt, clippy
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
       - name: Install just 1.59.0
         uses: taiki-e/install-action@v2
         with:
@@ -257,6 +269,9 @@ jobs:
         with:
           toolchain: "1.99.1"
           components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-nextest 0.9.151
         uses: taiki-e/install-action@v2

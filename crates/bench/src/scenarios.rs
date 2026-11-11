@@ -434,11 +434,11 @@ fn commit_sale_line(
     )
     .map_err(BenchError::Sql)?;
     tx.execute(
-        "INSERT INTO outbox (id, tenant_id, entity, entity_id, payload, created_at, \
-         updated_at, sent_at, attempts, version) \
-         VALUES (?1, 'bench-tenant', 'stock', ?2, '{}', 1790000000000, 1790000000000, \
-         NULL, 0, 1)",
-        params![format!("outbox-stock-bench-{run_id}-{sale_no}-{line}"), sku],
+        "INSERT INTO outbox (id, tenant_id, branch_id, entity, stream, payload, \
+         idempotency_key, created_at, updated_at, sent_at, attempts, version) \
+         VALUES (?1, 'bench-tenant', 'bench-branch', 'stock_movement', 'stock_movement', \
+         '{}', ?1, 1790000000000, 1790000000000, NULL, 0, 1)",
+        params![format!("outbox-stock-bench-{run_id}-{sale_no}-{line}")],
     )
     .map_err(BenchError::Sql)?;
     Ok(())
@@ -505,10 +505,11 @@ fn commit_sale_tail(
     )
     .map_err(BenchError::Sql)?;
     tx.execute(
-        "INSERT INTO outbox (id, tenant_id, entity, entity_id, payload, created_at, \
-         updated_at, sent_at, attempts, version) \
-         VALUES (?1, 'bench-tenant', 'sale', ?2, '{}', 1790000000000, 1790000000000, NULL, 0, 1)",
-        params![format!("outbox-bench-{run_id}-{sale_no}"), sale_id],
+        "INSERT INTO outbox (id, tenant_id, branch_id, entity, stream, payload, \
+         idempotency_key, created_at, updated_at, sent_at, attempts, version) \
+         VALUES (?1, 'bench-tenant', 'bench-branch', 'sale', 'sale', '{}', ?1, \
+         1790000000000, 1790000000000, NULL, 0, 1)",
+        params![format!("outbox-bench-{run_id}-{sale_no}")],
     )
     .map_err(BenchError::Sql)?;
     tx.execute(

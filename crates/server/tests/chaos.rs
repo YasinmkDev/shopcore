@@ -12,6 +12,15 @@
 //! they print a loud message naming the skipped tests. Without the flag
 //! and without Postgres, they FAIL.
 
+use shopcore_core::draft::{draft_add_line, open_draft};
+use shopcore_core::sale::{CompleteSaleCashInput, SaleCompleted, complete_sale_cash};
+use shopcore_core::scratch::ScratchDb;
+use shopcore_core::settings::{
+    KEY_ACTIVE_PRICE_LIST, KEY_CASH_ROUNDING_GRANULARITY_MINOR, KEY_TAX_DEFAULT_RATE_BP,
+    KEY_TENANT_CURRENCY, KEY_TENANT_CURRENCY_EXPONENT, SCOPE_TENANT, set_setting,
+};
+use shopcore_core::users::{create_role, create_user};
+use shopcore_db::{Db, DbError};
 use shopcore_protocol::{OutboxRow, PriceListEntry, SyncBatch};
 use shopcore_server::{
     ServerState, applied_push_count, apply_price_entry, current_sequence, get_price_entry,
@@ -28,7 +37,8 @@ fn postgres_available() -> bool {
         eprintln!(
             "LOUD SKIP: SHOPCORE_SKIP_POSTGRES_TESTS=1 — skipping ALL Postgres-backed \
              chaos tests (duplicate, out-of-order, drop, restart, skew, last-unit, \
-             upgrade, snapshot, replay, LWW, gap-detector, revalidation). \
+             upgrade, snapshot, replay, LWW, gap-detector, revalidation, \
+             till-outbox-push). \
              This is NOT a pass; the tests did not run."
         );
         return false;
@@ -624,6 +634,386 @@ async fn revalidation_stub_flags_mismatch() {
     // Overflow is flagged (checked add, never wraps).
     let err = revalidate_sale(&[i64::MAX, 1], 0).unwrap_err();
     assert!(format!("{err}").contains("overflow"));
+}
+
+/// A real till (001b-1 migrations + 001b-2 sale use cases) whose
+/// tenant/branch match the harness's, so its outbox rows push to the
+/// real server. One SKU (`TST100`, 100.00 exclusive @18%).
+struct TillFixture {
+    db: Db,
+    scratch: ScratchDb,
+    tenant_id: String,
+    branch_id: String,
+    terminal_id: String,
+    shift_id: String,
+    cashier_id: String,
+    sku_id: Uuid,
+}
+
+/// Build the till: migrations, one cashier role + user (one Argon2id
+/// PIN hash), branch/terminal, `STD` 18% tax group + rate, one SKU
+/// with opening stock, tenant settings. Mirrors the core sale tests'
+/// fixture, but every id is a real `UUIDv7` (the server parses the
+/// pushed `sku_id` as a `Uuid`) and the tenant/branch are the
+/// harness's.
+/// Seed the till's org + catalog in one transaction: branch/terminal,
+/// `STD` 18% tax group + rate, one SKU with opening stock.
+#[allow(clippy::too_many_arguments)]
+fn seed_till_org_and_catalog(
+    db: &Db,
+    tenant: &str,
+    branch: &str,
+    terminal_id: &str,
+    shift_id: &str,
+    tax_std_id: &str,
+    tax_rate_id: &str,
+    sku_id: Uuid,
+    now: i64,
+) {
+    let tenant = tenant.to_string();
+    let branch = branch.to_string();
+    let terminal_id = terminal_id.to_string();
+    let shift_id = shift_id.to_string();
+    let tax_std_id = tax_std_id.to_string();
+    let tax_rate_id = tax_rate_id.to_string();
+    let sku = sku_id.to_string();
+    db.write(move |conn| {
+        let tx = conn.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO branch (id, tenant_id, code, name, created_at, updated_at, version) VALUES (?1, ?2, 'MAIN', 'Main Branch', ?3, ?3, 1)",
+            rusqlite::params![branch, tenant, now],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO terminal (id, tenant_id, branch_id, code, name, created_at, updated_at, version) VALUES (?1, ?2, ?3, 'T1', 'Till 1', ?4, ?4, 1)",
+            rusqlite::params![terminal_id, tenant, branch, now],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO tax_group (id, tenant_id, code, name, price_includes_tax, created_at, updated_at, version) VALUES (?1, ?2, 'STD', 'Standard 18%', 0, ?3, ?3, 1)",
+            rusqlite::params![tax_std_id, tenant, now],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO tax_rate (id, tenant_id, tax_group_id, rate_bp, created_at, updated_at, version) VALUES (?1, ?2, ?3, 1800, ?4, ?4, 1)",
+            rusqlite::params![tax_rate_id, tenant, tax_std_id, now],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO uom (id, tenant_id, code, name, created_at, updated_at, version) VALUES ('uom-ea', ?1, 'EA', 'Each', ?2, ?2, 1)",
+            rusqlite::params![tenant, now],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO price_list (id, tenant_id, code, name, created_at, updated_at, version) VALUES ('pricelist-std', ?1, 'STD', 'Standard', ?2, ?2, 1)",
+            rusqlite::params![tenant, now],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO shift (id, tenant_id, branch_id, terminal_id, status, opened_at, created_at, updated_at, version) VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?5, ?5, 1)",
+            rusqlite::params![shift_id, tenant, branch, terminal_id, now],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO item (id, tenant_id, code, name, base_uom_id, tax_group_id, created_at, updated_at, version) VALUES ('item-TST100', ?1, 'TST100', 'TST100', 'uom-ea', ?2, ?3, ?3, 1)",
+            rusqlite::params![tenant, tax_std_id, now],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO sku (id, tenant_id, item_id, code, name, base_uom_id, tax_group_id, created_at, updated_at, version) VALUES (?1, ?2, 'item-TST100', 'TST100', 'TST100', 'uom-ea', ?3, ?4, ?4, 1)",
+            rusqlite::params![sku, tenant, tax_std_id, now],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO barcode (id, tenant_id, sku_id, code, is_primary, created_at, updated_at, version) VALUES ('barcode-TST100', ?1, ?2, '1234567890998', 1, ?3, ?3, 1)",
+            rusqlite::params![tenant, sku, now],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO price_list_entry (id, tenant_id, price_list_id, sku_id, price_e4, created_at, updated_at, version) VALUES ('ple-TST100', ?1, 'pricelist-std', ?2, 1000000, ?3, ?3, 1)",
+            rusqlite::params![tenant, sku, now],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO stock_balance (id, tenant_id, branch_id, sku_id, qty_milli, created_at, updated_at, version) VALUES ('bal-TST100', ?1, ?2, ?3, 10000, ?4, ?4, 1)",
+            rusqlite::params![tenant, branch, sku, now],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO stock_movement (id, tenant_id, branch_id, sku_id, type, qty_milli, unit_cost_e4, occurred_at, created_at, updated_at, version) VALUES ('mov-open-TST100', ?1, ?2, ?3, 'opening', 10000, 0, ?4, ?4, ?4, 1)",
+            rusqlite::params![tenant, branch, sku, now],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        Ok(())
+    })
+    .expect("till org + catalog");
+}
+
+fn build_till(tenant_id: Uuid, branch_id: Uuid) -> TillFixture {
+    let dir = std::env::temp_dir().join(format!("shopcore-till-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).expect("till dir");
+    let db = Db::open(dir.join("till.db"), None).expect("till db");
+    let scratch = ScratchDb::open(dir.join("scratch.db")).expect("scratch db");
+    let tenant = tenant_id.to_string();
+    let branch = branch_id.to_string();
+    let terminal_id = Uuid::now_v7().to_string();
+    let shift_id = Uuid::now_v7().to_string();
+    let tax_std_id = Uuid::now_v7().to_string();
+    let tax_rate_id = Uuid::now_v7().to_string();
+    let sku_id = Uuid::now_v7();
+    let now = now_ms();
+    // `ensure_outbox_schema` (the sync-client's table creator) must
+    // NOT conflict with the migration's outbox table — it is a no-op
+    // when the table already exists with the spec-005 columns.
+    db.write(|conn| ensure_outbox_schema(conn).map_err(|e| DbError::InvalidInput(e.to_string())))
+        .expect("ensure_outbox_schema is a no-op on the migrated table");
+    let role =
+        create_role(&db, &tenant, "Cashier", &["sale.create"], 500, now).expect("cashier role");
+    let cashier =
+        create_user(&db, &tenant, "cashier", "1234", Some(&role.id), now).expect("cashier user");
+    seed_till_org_and_catalog(
+        &db,
+        &tenant,
+        &branch,
+        &terminal_id,
+        &shift_id,
+        &tax_std_id,
+        &tax_rate_id,
+        sku_id,
+        now,
+    );
+    set_setting(
+        &db,
+        &tenant,
+        SCOPE_TENANT,
+        "",
+        KEY_TENANT_CURRENCY,
+        "PKR",
+        now,
+    )
+    .expect("currency setting");
+    set_setting(
+        &db,
+        &tenant,
+        SCOPE_TENANT,
+        "",
+        KEY_TENANT_CURRENCY_EXPONENT,
+        "2",
+        now,
+    )
+    .expect("exponent setting");
+    set_setting(
+        &db,
+        &tenant,
+        SCOPE_TENANT,
+        "",
+        KEY_CASH_ROUNDING_GRANULARITY_MINOR,
+        "0",
+        now,
+    )
+    .expect("cash rounding setting");
+    set_setting(
+        &db,
+        &tenant,
+        SCOPE_TENANT,
+        "",
+        KEY_TAX_DEFAULT_RATE_BP,
+        "1800",
+        now,
+    )
+    .expect("tax default setting");
+    set_setting(
+        &db,
+        &tenant,
+        SCOPE_TENANT,
+        "",
+        KEY_ACTIVE_PRICE_LIST,
+        "pricelist-std",
+        now,
+    )
+    .expect("price list setting");
+    TillFixture {
+        db,
+        scratch,
+        tenant_id: tenant,
+        branch_id: branch,
+        terminal_id,
+        shift_id,
+        cashier_id: cashier.id,
+        sku_id,
+    }
+}
+
+/// Assert the migrated outbox columns: every unsent row carries
+/// the branch, and its idempotency key IS its own id.
+fn assert_outbox_columns(till: &TillFixture, n: usize) {
+    // idempotency key IS its own id.
+    let cols = till
+        .db
+        .read(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT branch_id, idempotency_key, id FROM outbox WHERE sent_at IS NULL")
+                .map_err(DbError::from)?;
+            let mapped = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(DbError::from)?;
+            let mut out = Vec::new();
+            for r in mapped {
+                out.push(r.map_err(DbError::from)?);
+            }
+            Ok(out)
+        })
+        .expect("read outbox columns");
+    assert_eq!(cols.len(), n);
+    for (branch_id, idem, id) in &cols {
+        assert_eq!(branch_id, &till.branch_id);
+        assert_eq!(idem, id, "idempotency_key is the row's own id");
+    }
+}
+
+/// Complete a real sale on the till: 1x 100.00 exclusive @18%
+/// (the 001a golden: tax 18.00, total 118.00), tender 118.00.
+fn complete_till_sale(till: &TillFixture, now: i64) -> SaleCompleted {
+    // (the 001a golden: tax 18.00, total 118.00), tender 118.00.
+    let cart = open_draft(
+        &till.scratch,
+        &till.tenant_id,
+        &till.branch_id,
+        &till.terminal_id,
+        Some(&till.shift_id),
+        Some(&till.cashier_id),
+        now,
+    )
+    .expect("open draft");
+    draft_add_line(
+        &till.scratch,
+        &cart.id,
+        &till.sku_id.to_string(),
+        1_000,
+        1_000_000,
+        now,
+    )
+    .expect("add line");
+    let completed = complete_sale_cash(
+        &till.db,
+        &till.scratch,
+        CompleteSaleCashInput {
+            tenant_id: till.tenant_id.clone(),
+            branch_id: till.branch_id.clone(),
+            terminal_id: till.terminal_id.clone(),
+            branch_code: "MAIN".to_string(),
+            terminal_code: "T1".to_string(),
+            shift_id: till.shift_id.clone(),
+            user_id: till.cashier_id.clone(),
+            draft_id: cart.id.clone(),
+            tender_minor: 11_800,
+            now_ms: now,
+            date_yyyymmdd: "20261111".to_string(),
+        },
+        None,
+    )
+    .expect("complete sale");
+    assert!(completed.is_fresh, "the sale commits fresh");
+    assert_eq!(completed.total_minor, 11_800);
+    assert_eq!(completed.change_minor, 0);
+    completed
+}
+
+/// Item 1 (owner decision 2026-11-11): REAL till outbox rows push to
+/// the REAL server and the server revalidates the sale. The till is a
+/// 001b-1 migration + 001b-2 sale; the outbox rows are read through
+/// the sync-client's own reader and pushed over real HTTP; the
+/// server's ack, `applied_push` count, derived stock balance, and
+/// `revalidate_sale` on the pushed sale's line totals are all
+/// asserted. If revalidation flags a mismatch on this real till sale,
+/// that is a BUG — not a test to weaken.
+#[tokio::test]
+async fn till_outbox_pushes_to_real_server_and_revalidates() {
+    require_postgres!();
+    let h = Harness::start().await;
+    let till = build_till(h.tenant_id, h.branch_id);
+    let now = now_ms();
+    let completed = complete_till_sale(&till, now);
+    // The outbox rows the sale wrote, read through the sync-client's
+    // own reader (the same code the real sync worker uses) — this is
+    // the proof the migrated table has the spec-005 columns
+    // (`stream` included).
+    let rows = till
+        .db
+        .read(|conn| {
+            read_unsent_outbox(conn, 200).map_err(|e| DbError::InvalidInput(e.to_string()))
+        })
+        .expect("read outbox");
+    let n = rows.len();
+    assert_eq!(n, 2, "one sale row + one stock_movement row");
+    assert!(
+        rows.iter()
+            .any(|r| r.entity == "sale" && r.stream == "sale")
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.entity == "stock_movement" && r.stream == "stock_movement")
+    );
+    assert_outbox_columns(&till, n);
+    // Push the REAL till rows to the REAL server.
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let ack = h
+        .client
+        .push(&batch(h.tenant_id, h.branch_id, rows))
+        .await
+        .expect("push");
+    assert_eq!(ack.accepted.len(), n, "the server accepted every row");
+    assert_eq!(
+        applied_push_count(&h.pool, h.tenant_id)
+            .await
+            .expect("count"),
+        i64::try_from(n).unwrap_or(i64::MAX),
+        "every row is in applied_push"
+    );
+    // The server derived the stock balance from the pushed movement.
+    // It has no opening stock, so the balance is the sale alone: -1000.
+    assert_eq!(
+        get_stock_balance(&h.pool, h.tenant_id, h.branch_id, till.sku_id)
+            .await
+            .expect("balance"),
+        -1_000
+    );
+    // The server revalidates the pushed sale: the line totals sum to
+    // the sale total — no mismatch flagged.
+    let line_total = till
+        .db
+        .read(|conn| {
+            conn.query_row(
+                "SELECT total_minor FROM sale_line WHERE sale_id = ?1",
+                rusqlite::params![completed.sale_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(DbError::from)
+        })
+        .expect("line total");
+    assert!(revalidate_sale(&[line_total], completed.total_minor).is_ok());
+    // Mark sent (the real sync worker's step after the ack): the
+    // outbox is empty afterwards.
+    till.db
+        .write(move |conn| {
+            mark_sent(conn, &ids, now_ms()).map_err(|e| DbError::InvalidInput(e.to_string()))
+        })
+        .expect("mark sent");
+    let remaining = till
+        .db
+        .read(|conn| {
+            read_unsent_outbox(conn, 200).map_err(|e| DbError::InvalidInput(e.to_string()))
+        })
+        .expect("read outbox again");
+    assert!(remaining.is_empty(), "the outbox is empty after mark_sent");
+    h.server.abort();
 }
 
 /// Performance measurement (ignored in CI; run locally with

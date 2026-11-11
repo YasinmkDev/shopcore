@@ -23,8 +23,7 @@
 
 use shopcore_core::draft::{draft_add_line, open_draft, restore_draft};
 use shopcore_core::sale::{
-    CompleteSaleCashInput, FaultInjector, STEP_COMMIT, STEP_SHIFT, STEP_STOCK, TaxMode,
-    complete_sale_cash,
+    CompleteSaleCashInput, FaultInjector, STEP_COMMIT, STEP_SHIFT, STEP_STOCK, complete_sale_cash,
 };
 use shopcore_core::scratch::ScratchDb;
 use shopcore_core::settings::{
@@ -305,7 +304,6 @@ fn worker_sale_mode(db: &Db, scratch: &ScratchDb, signal: &Path, cashier_id: &st
             tender_minor: 100_000,
             now_ms: NOW,
             date_yyyymmdd: DATE.to_string(),
-            tax_mode: TaxMode::Exclusive,
         },
         Some(&injector),
     );
@@ -371,7 +369,6 @@ fn crash_worker() {
                         tender_minor: 100_000,
                         now_ms: NOW,
                         date_yyyymmdd: DATE.to_string(),
-                        tax_mode: TaxMode::Exclusive,
                     },
                     None,
                 );

@@ -73,3 +73,16 @@ unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 indexing_slicing = "deny"
+
+# Dev-profile speed for the PIN-hash crates (spec 001b-1): Argon2 verify
+# is ~1,765 ms at opt-level 0 in debug builds, which dominates the PIN
+# tests. opt-level 3 for argon2 and its pure-Rust deps only — no new
+# crates, no change to the release profile or to any other crate.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.dev.package.password-hash]
+opt-level = 3

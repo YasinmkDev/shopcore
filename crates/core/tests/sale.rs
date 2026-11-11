@@ -26,7 +26,7 @@ use shopcore_core::draft::{
 use shopcore_core::sale::{
     CompleteSaleCashInput, FaultInjector, PrintStatus, STEP_AGGREGATES, STEP_AUDIT, STEP_COMMIT,
     STEP_IDEMPOTENCY, STEP_LINES, STEP_OUTBOX, STEP_PAYMENT, STEP_PRICING, STEP_PRINT_JOB,
-    STEP_RECEIPT_COUNTER, STEP_SALE, STEP_SHIFT, STEP_STOCK, STEP_TAX_ROWS, SaleError, TaxMode,
+    STEP_RECEIPT_COUNTER, STEP_SALE, STEP_SHIFT, STEP_STOCK, STEP_TAX_ROWS, SaleError,
     attempt_print, complete_sale_cash, kick_drawer, negative_stock_skus, reprint_receipt,
 };
 use shopcore_core::scratch::ScratchDb;
@@ -56,7 +56,9 @@ const TERMINAL_CODE: &str = "T1";
 const SHIFT_ID: &str = "shift-001";
 const TAX_STD_ID: &str = "tax-std";
 const TAX_ZERO_ID: &str = "tax-zero";
+const TAX_INC_ID: &str = "tax-inc";
 const TAX_RATE_STD_ID: &str = "taxrate-std-18";
+const TAX_RATE_INC_ID: &str = "taxrate-inc-18";
 const PRICE_LIST_ID: &str = "pricelist-std";
 /// The `SQLCipher` key for test DBs (a hardcoded test key, same as the
 /// `db`-crate tests — never a production key).
@@ -121,6 +123,34 @@ const CATALOG: &[(&str, &str, &str, i64, &str, i64)] = &[
         "1234567890999",
         443_400,
         "STD",
+        10_000,
+    ),
+    // Golden-value SKUs for the tax-mode tests (001a goldens):
+    // TST100 is 100.00 exclusive @18% (tax 18.00, total 118.00);
+    // TST118 is 118.00 inclusive @18% (net 100.00, tax 18.00);
+    // TST010 is 10.00 zero-rated (net-cash test).
+    (
+        "sku-tst100",
+        "TST100",
+        "1234567890998",
+        1_000_000,
+        "STD",
+        10_000,
+    ),
+    (
+        "sku-tst118",
+        "TST118",
+        "1234567890997",
+        1_180_000,
+        "INC",
+        10_000,
+    ),
+    (
+        "sku-tst010",
+        "TST010",
+        "1234567890996",
+        100_000,
+        "ZERO",
         10_000,
     ),
 ];
@@ -274,6 +304,16 @@ fn seed_template_org(db: &Db) {
         )
         .unwrap();
         tx.execute(
+            "INSERT INTO tax_group (id, tenant_id, code, name, price_includes_tax, created_at, updated_at, version) VALUES (?1, ?2, 'INC', 'Inclusive 18%', 1, ?3, ?3, 1)",
+            rusqlite::params![TAX_INC_ID, TENANT, NOW],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO tax_rate (id, tenant_id, tax_group_id, rate_bp, created_at, updated_at, version) VALUES (?1, ?2, ?3, 1800, ?4, ?4, 1)",
+            rusqlite::params![TAX_RATE_INC_ID, TENANT, TAX_INC_ID, NOW],
+        )
+        .unwrap();
+        tx.execute(
             "INSERT INTO tax_rate (id, tenant_id, tax_group_id, rate_bp, created_at, updated_at, version) VALUES (?1, ?2, ?3, 1800, ?4, ?4, 1)",
             rusqlite::params![TAX_RATE_STD_ID, TENANT, TAX_STD_ID, NOW],
         )
@@ -307,10 +347,10 @@ fn seed_template_org(db: &Db) {
 /// Catalog + opening stock (balance == sum(movements) from the start).
 fn seed_template_catalog(db: &Db) {
     for (sku, code, barcode, price_e4, tax, qty_milli) in CATALOG {
-        let tax_group = if *tax == "STD" {
-            TAX_STD_ID
-        } else {
-            TAX_ZERO_ID
+        let tax_group = match *tax {
+            "STD" => TAX_STD_ID,
+            "INC" => TAX_INC_ID,
+            _ => TAX_ZERO_ID,
         };
         let uom = if *code == "SGR1KG" || *code == "RCE5KG" {
             "uom-kg"
@@ -483,7 +523,6 @@ impl Fixture {
                 tender_minor,
                 now_ms: NOW,
                 date_yyyymmdd: DATE.to_string(),
-                tax_mode: TaxMode::Exclusive,
             },
             None,
         )
@@ -571,6 +610,21 @@ impl Fixture {
                     out.push(row.unwrap());
                 }
                 Ok(out)
+            })
+            .unwrap()
+    }
+
+    /// The `daily_cash_summary` row for the sale date:
+    /// (`cash_sales_minor`, `expected_minor`).
+    fn daily_cash(&self) -> (i64, i64) {
+        self.db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT cash_sales_minor, expected_minor FROM daily_cash_summary WHERE date = '20261111'",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .map_err(shopcore_db::DbError::from)
             })
             .unwrap()
     }
@@ -688,15 +742,29 @@ fn sale_completes_and_writes_everything() {
     );
     assert_eq!(verify_audit_chain(&fx.db, TENANT, TERMINAL_ID).unwrap(), 1);
 
-    // Outbox: one sale row + one stock row per SKU.
+    // Outbox: one sale row + one stock row per SKU (spec-005 columns:
+    // the stock rows ride stream `stock_movement`).
     assert_eq!(fx.count("SELECT COUNT(*) FROM outbox"), 3);
     assert_eq!(
         fx.count("SELECT COUNT(*) FROM outbox WHERE entity = 'sale'"),
         1
     );
     assert_eq!(
-        fx.count("SELECT COUNT(*) FROM outbox WHERE entity = 'stock'"),
+        fx.count("SELECT COUNT(*) FROM outbox WHERE entity = 'stock_movement'"),
         2
+    );
+    assert_eq!(
+        fx.count("SELECT COUNT(*) FROM outbox WHERE stream = 'sale'"),
+        1
+    );
+    assert_eq!(
+        fx.count("SELECT COUNT(*) FROM outbox WHERE stream = 'stock_movement'"),
+        2
+    );
+    // Every row's idempotency key is its own id.
+    assert_eq!(
+        fx.count("SELECT COUNT(*) FROM outbox WHERE idempotency_key != id"),
+        0
     );
 
     // Print job queued; the draft is tombstoned (in the scratch DB)
@@ -790,7 +858,6 @@ fn sale_requires_sale_create() {
             tender_minor: 6_000,
             now_ms: NOW,
             date_yyyymmdd: DATE.to_string(),
-            tax_mode: TaxMode::Exclusive,
         },
         None,
     )
@@ -918,7 +985,6 @@ fn fault_injection_rolls_back_at_each_step() {
                 tender_minor: 100_000,
                 now_ms: NOW,
                 date_yyyymmdd: DATE.to_string(),
-                tax_mode: TaxMode::Exclusive,
             },
             Some(&injector),
         )
@@ -1111,11 +1177,13 @@ fn outbox_rows_in_same_transaction() {
         .unwrap();
     assert!(sale_payload.contains(&done.sale_id));
     assert!(sale_payload.contains("MAIN-T1-20261111-1"));
-    let stock_rows: Vec<String> = fx
+    let stock_payloads: Vec<String> = fx
         .db
         .read(|conn| {
             let mut stmt = conn
-                .prepare("SELECT entity_id FROM outbox WHERE entity = 'stock' ORDER BY entity_id")
+                .prepare(
+                    "SELECT payload FROM outbox WHERE entity = 'stock_movement' ORDER BY payload",
+                )
                 .unwrap();
             let rows = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
             let mut out = Vec::new();
@@ -1125,7 +1193,130 @@ fn outbox_rows_in_same_transaction() {
             Ok(out)
         })
         .unwrap();
-    assert_eq!(stock_rows, vec![sku_id("MILK1L"), sku_id("TEA200")]);
+    assert_eq!(stock_payloads.len(), 2);
+    assert!(
+        stock_payloads[0].contains(sku_id("MILK1L"))
+            || stock_payloads[1].contains(sku_id("MILK1L")),
+        "a stock row names MILK1L"
+    );
+    assert!(
+        stock_payloads[0].contains(sku_id("TEA200"))
+            || stock_payloads[1].contains(sku_id("TEA200")),
+        "a stock row names TEA200"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tax mode from the data (owner decision 2026-11-11)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn exclusive_sale_uses_the_groups_flag() {
+    // 001a golden: net 100.00 @18% exclusive → tax 18.00, total 118.00.
+    let fx = Fixture::new("tax-exclusive");
+    let draft_id = fx.draft_with(&[("TST100", 1_000)]);
+    let done = fx.complete(&draft_id, 11_800).unwrap();
+    assert_eq!(done.total_minor, 11_800);
+    assert_eq!(done.change_minor, 0);
+    assert_eq!(
+        fx.sale_totals(&done.receipt_no),
+        (10_000, 0, 1_800, 11_800),
+        "subtotal is the net for an exclusive line"
+    );
+    assert_eq!(fx.tax_rows(), vec![(1_800, 1_800)]);
+}
+
+#[test]
+fn inclusive_sale_uses_the_groups_flag() {
+    // 001a golden: gross 118.00 @18% inclusive → net 100.00, tax 18.00.
+    let fx = Fixture::new("tax-inclusive");
+    let draft_id = fx.draft_with(&[("TST118", 1_000)]);
+    let done = fx.complete(&draft_id, 11_800).unwrap();
+    assert_eq!(done.total_minor, 11_800);
+    assert_eq!(done.change_minor, 0);
+    // The domain's subtotal is the sum of line GROSSES, so for an
+    // inclusive line it is the shelf price (11800), not the net.
+    assert_eq!(
+        fx.sale_totals(&done.receipt_no),
+        (11_800, 0, 1_800, 11_800),
+        "subtotal is the gross for an inclusive line"
+    );
+    assert_eq!(fx.tax_rows(), vec![(1_800, 1_800)]);
+}
+
+#[test]
+fn mixed_mode_sale_uses_each_lines_own_flag() {
+    // One exclusive line (TST100: 100.00 + 18.00 tax) and one inclusive
+    // line (TST118: 118.00 incl. 18.00 tax) in the same sale — no
+    // sale-level mode, each line uses its own group's flag.
+    let fx = Fixture::new("tax-mixed");
+    let draft_id = fx.draft_with(&[("TST100", 1_000), ("TST118", 1_000)]);
+    let done = fx.complete(&draft_id, 23_600).unwrap();
+    assert_eq!(done.total_minor, 23_600);
+    assert_eq!(done.change_minor, 0);
+    assert_eq!(
+        fx.sale_totals(&done.receipt_no),
+        (21_800, 0, 3_600, 23_600),
+        "subtotal 10000 + 11800, tax 1800 + 1800"
+    );
+    assert_eq!(fx.tax_rows(), vec![(1_800, 1_800), (1_800, 1_800)]);
+}
+
+// ---------------------------------------------------------------------------
+// Net cash (owner fix 2026-11-11)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn daily_cash_summary_uses_net_cash_not_tender() {
+    let fx = Fixture::new("net-cash");
+    // Sale 1: total 52.32, tender 60.00 → net cash 52.32.
+    let draft1 = fx.draft_with(&[("TST44", 1_000)]);
+    fx.complete(&draft1, 6_000).unwrap();
+    // Sale 2: total 10.00, tender 10.00 → net cash 10.00.
+    let draft2 = fx.draft_with(&[("TST010", 1_000)]);
+    fx.complete(&draft2, 1_000).unwrap();
+    // Net cash: 5232 + 1000 = 6232 — NOT the tender total (7000).
+    // (The sale code already accumulates the total, not the tender;
+    // this test pins that behaviour.)
+    assert_eq!(fx.daily_cash(), (6_232, 6_232));
+}
+
+// ---------------------------------------------------------------------------
+// Replay indicator (owner fix 2026-11-11)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn replay_with_a_different_tender_returns_the_original_sale() {
+    let fx = Fixture::new("replay-tender");
+    let draft_id = fx.draft_with(&[("TST44", 1_000)]);
+    let first = fx.complete(&draft_id, 6_000).unwrap();
+    assert!(
+        !first.already_completed(),
+        "the first call commits a new sale"
+    );
+    assert_eq!(first.total_minor, 5_232);
+    assert_eq!(first.change_minor, 768);
+    // Second call, same draft, a DIFFERENT tender: the original sale
+    // comes back unchanged, flagged as already completed.
+    let second = fx.complete(&draft_id, 10_000).unwrap();
+    assert!(
+        second.already_completed(),
+        "the second call is a replay, not a new sale"
+    );
+    assert_eq!(second.sale_id, first.sale_id);
+    assert_eq!(second.receipt_no, first.receipt_no);
+    assert_eq!(second.total_minor, first.total_minor);
+    assert_eq!(
+        second.change_minor, 768,
+        "change is recomputed from the ORIGINAL tender (6000), not the new one (10000)"
+    );
+    assert_eq!(second.change_minor, first.change_minor);
+    // Still exactly one sale row and one sale stock posting.
+    assert_eq!(fx.count("SELECT COUNT(*) FROM sale"), 1);
+    assert_eq!(
+        fx.count("SELECT COUNT(*) FROM stock_movement WHERE type = 'sale'"),
+        1
+    );
 }
 
 // ---------------------------------------------------------------------------

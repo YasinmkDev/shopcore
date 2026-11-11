@@ -173,7 +173,7 @@ run for unknown usernames cost one verification each by design. If a
 future target PC measures materially slower, the trade-off (lower memory
 vs longer lockout) is recorded here first — never silently weakened.
 
-## ADR-034 — Draft cart lives in a separate scratch DB; accepted loss window. Accepted 2026-11-11
+## ADR-034 — Draft cart lives in a separate scratch DB; accepted loss window. Accepted 2026-11-11; loss window CORRECTED 2026-11-11 (owner fix)
 The open draft cart (`draft_sale` / `draft_line`) is persisted in a
 SEPARATE scratch DB file with its own connection, `WAL` +
 `synchronous=NORMAL` — never in the main DB, which stays
@@ -183,18 +183,41 @@ cases (`draft_add_line`, `draft_set_qty`, `draft_remove_line`,
 scan path never touches the main DB with a `FULL` flush. The sale
 commit (`complete_sale_cash`) is one transaction on the main DB only.
 
-Accepted loss window: in a power cut, at most the scratch DB's
-unflushed tail can be lost — the cashier re-scans the last line or
-two. A committed sale is NEVER affected: it lives in the main DB
-(`synchronous=FULL`) and is idempotent per `draft_id` (UNIQUE), so a
-second `complete_sale_cash` with the same `draft_id` returns the
-existing sale. A completed draft is TOMBSTONED in the scratch DB and
-restore discards any draft whose sale exists in the main DB, so a late
-scratch-DB flush can never resurrect a completed draft. A process kill
-cannot simulate a power cut (the OS still flushes the file on process
-death) — the crash tests prove ATOMICITY and RECOVERY only; the
-power-cut loss itself is proven by the manual power-pull test, a
-pre-pilot checklist item (owner: user).
+Loss window (CORRECTED): in SQLite WAL mode with
+`synchronous=NORMAL`, commits may be lost back to the LAST
+CHECKPOINT on power loss — so the loss window is NOT "the unflushed
+tail" (~250 ms, as first written). The window is the time from the
+last draft change to the last checkpoint. To bound it, the scratch
+DB runs a CHECKPOINT TIMER on its own thread (`ScratchDb`, 1 s
+interval): every draft write re-arms the timer
+(`with_conn_write` → `mark_changed`), and the timer forces a WAL
+checkpoint (`PRAGMA wal_checkpoint(TRUNCATE)`) about 1 s after the
+draft last changed. The scan path never waits on it — a draft write
+only notifies the timer thread; the checkpoint itself runs on the
+timer thread. MEASURED bound (2026-11-11, dev VM, 4 writer threads
+hammering the scratch DB): **1.03 s** from the last draft change to
+the checkpoint completing (`crates/core/tests/scratch.rs`,
+`checkpoint_timer_bound_under_load`). So in a power cut, at most
+~1 s of draft changes can be lost — the cashier re-scans the last
+line or two. A committed sale is NEVER affected: it lives in the
+main DB (`synchronous=FULL`) and is idempotent per `draft_id`
+(UNIQUE), so a second `complete_sale_cash` with the same `draft_id`
+returns the existing sale. A completed draft is TOMBSTONED in the
+scratch DB and restore discards any draft whose sale exists in the
+main DB, so a late scratch-DB flush can never resurrect a completed
+draft. A process kill cannot simulate a power cut (the OS still
+flushes the file on process death) — the crash tests prove ATOMICITY
+and RECOVERY only; the power-cut loss itself is proven by the manual
+power-pull test, a pre-pilot checklist item (owner: user).
+
+## ADR note — Audit verification must become INCREMENTAL (future spec, NOT built)
+`verify_audit_chain` today re-reads and re-hashes the whole chain
+from genesis on every run. That is fine for one terminal's short
+history, but it does not scale: a future spec must make verification
+incremental — remember the last verified hash (and row count) and
+verify only the rows appended since, re-verifying from genesis only
+when the remembered hash does not match. NOT built now; the note is
+here so the next audit spec does not re-litigate it.
 
 ## ADR-009 assessment (spec 005, 2026-11-10) — KEEP
 The spike's 12 chaos tests all pass against a real Postgres (local) — duplicate delivery, out-of-order batches, connection drop, server restart, clock skew, two tills selling the last unit, upgrade with unsent outbox, snapshot interrupt/resume, full-history replay (byte-identical, unique constraint proven to fire), per-field LWW merge, gap detector, revalidation stub. No chaos test exposed a protocol design flaw, so the stop condition did not trigger. ADR-009 (custom outbox/inbox sync, not generic CRDT) is KEPT for Phase 5. Two notes for Phase 5: (1) the per-tenant sequence lock serializes batches per tenant — under high concurrency this is a throughput ceiling to measure; (2) the snapshot catalog is the set of SKUs the server has seen (via movements/price entries), not the full 500k-SKU catalog — the full-catalog snapshot is the manual target-PC run.

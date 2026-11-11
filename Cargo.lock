@@ -3575,6 +3575,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shopcore-db",
+ "shopcore-protocol",
  "thiserror 2.0.21",
 ]
 
@@ -3661,6 +3662,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "shopcore-core",
+ "shopcore-db",
  "shopcore-domain",
  "shopcore-protocol",
  "shopcore-sync-client",

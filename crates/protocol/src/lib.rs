@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub mod sync;
+pub mod time;
 
 pub use sync::{Cursor, OutboxRow, PriceListEntry, PullResponse, SyncAck, SyncBatch, Tombstone};
+pub use time::{from_iso8601, to_iso8601};
 
 /// Response to the `ping` command. Proves the UI → Rust round-trip.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

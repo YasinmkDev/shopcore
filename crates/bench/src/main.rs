@@ -21,31 +21,14 @@ use shopcore_bench::report::{Baseline, MachineRecord, Results, ScenarioResult};
 use shopcore_bench::scenarios;
 use shopcore_bench::{BenchError, real_schema, seed};
 
-/// ISO-8601 UTC timestamp, computed from the Unix epoch without a date
-/// library (civil-from-days algorithm).
+/// ISO-8601 UTC timestamp of the run, via the protocol crate's
+/// `to_iso8601` — the single place that formats ISO-8601.
 fn iso_now() -> String {
-    let secs = std::time::SystemTime::now()
+    let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let days = i64::try_from(secs / 86_400).unwrap_or(0);
-    let secs_of_day = secs % 86_400;
-    // Howard Hinnant's civil-from-days.
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = u64::try_from(doy - (153 * mp + 2) / 5 + 1).unwrap_or(1);
-    let month = u64::try_from(if mp < 10 { mp + 3 } else { mp - 9 }).unwrap_or(1);
-    let year = if month <= 2 { y + 1 } else { y };
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        secs_of_day / 3_600,
-        (secs_of_day % 3_600) / 60,
-        secs_of_day % 60
-    )
+        .map_or(0, |d| d.as_millis());
+    let millis = i64::try_from(millis).unwrap_or(0);
+    shopcore_protocol::to_iso8601(millis)
 }
 
 /// Tiny flag parser: `--key value` and boolean `--flag`.

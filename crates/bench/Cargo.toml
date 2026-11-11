@@ -27,6 +27,10 @@ hdrhistogram.workspace = true
 # via shopcore-db instead of a throwaway mirrored schema. Workspace
 # member, not a new external dependency.
 shopcore-db = { path = "../db", version = "0.1.0" }
+# Timestamp formatting for the exported run timestamp (`generated_at`):
+# the protocol crate is the single place that formats ISO-8601
+# (owner decision 2026-11-11). Workspace member, not a new dependency.
+shopcore-protocol = { path = "../protocol", version = "0.1.0" }
 
 [lints]
 workspace = true

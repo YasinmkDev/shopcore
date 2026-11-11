@@ -9,14 +9,14 @@
 ## Conventions
 - Table/column names `snake_case`. Every table: `id` (UUIDv7, TEXT or BLOB), `tenant_id`, `created_at`, `updated_at`, `deleted_at` (nullable), `version` (int, optimistic concurrency), plus `branch_id` where applicable.
 - Money columns end `_minor` (i64). Unit price/cost columns end `_e4`. Quantities end `_milli`. Rates end `_bp`.
-- No floats anywhere. Timestamps are stored as ISO-8601 UTC with a `Z` suffix (e.g. `2026-11-11T08:44:16Z`), which sorts lexicographically in the same order as chronologically. The UI formats locally. (Owner decision 2026-11-11 — supersedes the earlier "pick epoch ms" note. CONFLICT: spec 001b-1 implemented epoch-ms INTEGER columns + `now_ms`; a follow-up must migrate 001b-1 to ISO-8601 TEXT — ADR-031 allows migration rewrites until the first customer install. Do not write new timestamp code in epoch ms.)
+- No floats anywhere. Timestamps are stored as epoch-ms INTEGER in the DB (`created_at` / `updated_at` / `deleted_at` are INTEGER; code uses `now_ms: i64`). ISO-8601 UTC with a `Z` suffix is the WIRE/EXPORT format only, converted in ONE place — the `protocol` crate (`to_iso8601` / `from_iso8601`) — never formatted ad-hoc elsewhere. (Owner decision 2026-11-11 — supersedes the earlier "ISO-8601 in the DB" note and resolves the 001b-1 conflict; no migration change.)
 - Migrations: forward-only SQL files, numbered, idempotent, tested against a database from the previous release (customers upgrade in place). Never edit a shipped migration.
 - IDs are client-generated, so offline creation and idempotent sync are free.
 
 ## Key tables (columns abbreviated)
 - `branch` (code UNIQUE per tenant, name), `terminal` (branch_id, code UNIQUE per tenant+branch, name).
 - `item`, `sku` (item_id, code, name, base_uom_id, tax_group_id, track_batch, active), `barcode` (sku_id, code UNIQUE per tenant, is_primary, pack_qty_milli), `uom` (code, name).
-- `tax_group` (code, name), `tax_rate` (tax_group_id, rate_bp, valid_from/to).
+- `tax_group` (code, name, `price_includes_tax` INTEGER NOT NULL DEFAULT 0 — 0 = exclusive, 1 = inclusive; the mode comes from the DATA, per line's group, never a sale-level parameter), `tax_rate` (tax_group_id, rate_bp, valid_from/to).
 - `price_list`, `price_list_entry` (sku_id, price_e4, valid_from/to).
 - `sale` (branch_id, terminal_id, shift_id, receipt_no UNIQUE, status, customer_id, draft_id UNIQUE — the idempotency key for `complete_sale_cash`, totals *_minor, completed_at), `sale_line` (sku_id, qty_milli, unit_price_e4, discount_minor, tax_minor, total_minor, promo_json), `sale_payment` (method, amount_minor, reference), `sale_line_tax` (sale_line_id, tax_rate_id, tax_minor, rate_bp — one row per tax component per line).
 - `draft_sale` (branch_id, terminal_id, shift_id, user_id, status), `draft_line` (draft_sale_id, sku_id, qty_milli, unit_price_e4, discount_minor).
@@ -29,7 +29,7 @@
 - `print_job` (terminal_id, sale_id, payload_json — the semantic `PrintDoc`, status, attempts).
 - Aggregates: `daily_sales_summary`, `daily_item_sales`, `daily_cash_summary`.
 - `audit_log` (terminal_id, user_id, action, entity, entity_id, before_json, after_json, reason, at, prev_hash, row_hash — append-only; the hash chain is per terminal, `row_hash = SHA-256(prev_hash || canonical field encoding in fixed order)`).
-- `outbox` (id, entity, payload, created_at, sent_at, attempts), `sync_state` (cursor per stream).
+- `outbox` (id TEXT PRIMARY KEY — the row's UUIDv7, and the idempotency key; tenant_id, branch_id, entity, stream, payload, idempotency_key = id, created_at, updated_at, deleted_at, version, sent_at, attempts), `sync_state` (cursor per stream).
 
 Append-only enforcement (001b-1): SQLite triggers forbid UPDATE/DELETE on `stock_movement`, `audit_log`, and on COMPLETED `sale` / `sale_line` / `sale_payment` rows. Draft rows (`draft_sale` / `draft_line`) stay editable until the sale completes; once completed, the sale's rows are immutable. The catalog version counter (`settings[tenant/catalog.version]`) is bumped by a trigger on every INSERT/UPDATE/DELETE on a catalog table — the in-memory prefix index rebuilds whenever the counter moves, so a stale index is never served. The importer spec MUST measure the catalog-version trigger cost on a 50k-row import (24 triggers fire on every catalog write; a bulk import must not be slowed by them — measure and record the import time with and without the triggers before the importer ships).
 
