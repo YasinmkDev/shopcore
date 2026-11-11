@@ -30,7 +30,7 @@ Implement as CSS variables in `packages/ui-kit/tokens.css`; Tailwind maps to the
   /* text */
   --text:          #1B1B1A;
   --text-muted:    #6B6A66;
-  --text-faint:    #8F8E89;  /* placeholders only; never for essential text */
+  --text-faint:    #6A6965;  /* ≥ 4.5:1 vs surface, surface-subtle and surface-sunken (5.50 / 5.12 / 4.78:1). Placeholders are never the only label. */
   --text-on-accent:#FFFFFF;
 
   /* accent (single) */
@@ -55,7 +55,7 @@ Implement as CSS variables in `packages/ui-kit/tokens.css`; Tailwind maps to the
 [data-theme="dark"] {
   --bg:#121211; --surface:#1B1B1A; --surface-subtle:#222120; --surface-sunken:#181817;
   --border:#2C2B29; --border-strong:#3A3936;
-  --text:#ECEBE8; --text-muted:#A3A19B; --text-faint:#7C7A75; --text-on-accent:#06201D;
+  --text:#ECEBE8; --text-muted:#A3A19B; --text-faint:#908D87; --text-on-accent:#06201D; /* text-faint 5.21:1 vs surface, 4.86:1 vs surface-subtle, 5.37:1 vs surface-sunken (≥ 4.5:1). Placeholders are never the only label. */
   --accent:#14B8A6; --accent-hover:#2DD4BF; --accent-active:#5EEAD4; --accent-subtle:#10312E; --focus-ring:#2DD4BF;
   --success:#4ADE80; --success-bg:#0F2A1A; --warning:#FBBF24; --warning-bg:#2E2208;
   --danger:#F87171; --danger-bg:#331414; --info:#7DA2FF; --info-bg:#14203F;

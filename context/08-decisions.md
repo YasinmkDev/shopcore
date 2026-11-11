@@ -133,6 +133,27 @@ first customer freezes the migration history.
 ## ADR-030 — Scanner events use `tokio::sync::mpsc`, not `Stream`. Accepted 2026-11-10
 `06-hardware-integrations.md` sketches `BarcodeScanner::events() -> Stream<ScanEvent>`, but neither `futures` nor `tokio-stream` is a workspace dependency (only transitive `futures-core`/`futures-util` in the lockfile). Decision: scanner events are delivered over a `tokio::sync::mpsc::Receiver<ScanEvent>` — no new dependency (tokio `sync` feature is already enabled). The `06` sketch is updated to match. If a `Stream` API is ever needed (e.g. combinators over the event flow), adding `tokio-stream` is a new ADR with its own dependency proof.
 
+## ADR-033 — Production CSP: `style-src 'self'` + `style-src-attr 'unsafe-inline'`; dev relaxations in `devCsp` only. Accepted 2026-11-10
+Production CSP (owner decision 2026-11-10, follow-up to the closed spec
+000b): `default-src 'self'; script-src 'self'; style-src 'self';
+style-src-attr 'unsafe-inline'; img-src 'self' data:; font-src 'self';
+connect-src 'self' ipc: http://ipc.localhost`. The `style-src
+'unsafe-inline'` that shipped with spec 000 is REMOVED from production.
+Why it is safe: the production build emits an external CSS file and
+contains no inline `<style>` element (verified against the built dist:
+`dist/index.html` has 0 `<style>` tags, no inline `style` attributes in
+the HTML, styles arrive via `<link rel="stylesheet">`). The ONLY style
+exception is `style-src-attr 'unsafe-inline'`, because the
+@tanstack/react-virtual rows in `apps/ui/src/features/bench/BenchDebug.tsx`
+(the only `style={{...}}` props in the source) render inline `style`
+attributes at runtime — without it the virtualized list loses its
+row heights/positions. Inline `<style>` ELEMENTS stay blocked
+(`style-src 'self'`). Dev-only relaxations live in `devCsp` only:
+`style-src 'self' 'unsafe-inline'` (Vite HMR injects `<style>` tags in
+dev); every other directive is identical to production, and `devCsp`
+never allows `'unsafe-inline'` in `script-src` or `default-src`
+(enforced by the CSP test in `apps/ui/src/test/csp.test.ts`).
+
 ## ADR-009 assessment (spec 005, 2026-11-10) — KEEP
 The spike's 12 chaos tests all pass against a real Postgres (local) — duplicate delivery, out-of-order batches, connection drop, server restart, clock skew, two tills selling the last unit, upgrade with unsent outbox, snapshot interrupt/resume, full-history replay (byte-identical, unique constraint proven to fire), per-field LWW merge, gap detector, revalidation stub. No chaos test exposed a protocol design flaw, so the stop condition did not trigger. ADR-009 (custom outbox/inbox sync, not generic CRDT) is KEPT for Phase 5. Two notes for Phase 5: (1) the per-tenant sequence lock serializes batches per tenant — under high concurrency this is a throughput ceiling to measure; (2) the snapshot catalog is the set of SKUs the server has seen (via movements/price entries), not the full 500k-SKU catalog — the full-catalog snapshot is the manual target-PC run.
 

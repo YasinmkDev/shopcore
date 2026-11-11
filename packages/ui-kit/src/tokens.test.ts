@@ -6,14 +6,12 @@ import { describe, expect, it } from "vitest";
  * AA contrast checks computed from the token values in tokens.css
  * (context/10-ui-system.md: "contrast AA minimum for all text").
  *
- * KNOWN CONFLICT (reported, not silently weakened): --text-faint fails
- * the 4.5:1 bar in BOTH themes (light 3.28:1, dark 4.02:1 — computed
- * below). The token is defined in context/10 as "placeholders only;
- * never for essential text", so this test asserts the 3:1 floor for it
- * (the UI-component / non-essential-text bar) and the 4.5:1 bar for
- * every essential text pair. Darkening --text-faint to 4.5:1 needs a
- * context-file change (context/10) and the owner's word — it is NOT
- * done here, because tokens.css is a verbatim copy of context/10.
+ * --text-faint is held to the same 4.5:1 bar as every other text token
+ * (owner decision 2026-11-10): it must be ≥ 4.5:1 against surface,
+ * surface-subtle AND surface-sunken in both themes. The old 3:1 floor
+ * exception is gone — the token was darkened (light #6A6965, dark
+ * #908D87) and the rule is now "placeholders are never the only label"
+ * (the label is always present; the placeholder is a hint only).
  */
 
 const AA_TEXT = 4.5; // WCAG AA, normal text.
@@ -105,18 +103,19 @@ describe("token contrast (AA, computed from tokens.css)", () => {
   });
 
   it.each(["light", "dark"] as const)(
-    "theme %s: --text-faint meets the 3:1 floor (placeholders only)",
+    "theme %s: --text-faint is ≥ 4.5:1 against all three surfaces",
     (theme) => {
-      // See the header comment: --text-faint is placeholders-only per
-      // context/10 and fails 4.5:1 (light 3.28:1, dark 4.02:1). The 3:1
-      // floor is asserted here so the pair is covered and any regression
-      // below it fails loudly.
+      // Owner decision 2026-11-10: --text-faint meets the same 4.5:1
+      // bar as every other text token, on surface, surface-subtle AND
+      // surface-sunken. Placeholders are never the only label.
       const tokens = parseTokens(css, theme);
-      const ratio = contrastRatio(token(tokens, "text-faint"), token(tokens, "surface"));
-      expect(
-        ratio,
-        `--text-faint on --surface (${theme}) must be ≥ ${AA_NON_TEXT.toFixed(1)}:1, got ${ratio.toFixed(2)}:1`,
-      ).toBeGreaterThanOrEqual(AA_NON_TEXT);
+      for (const bg of ["surface", "surface-subtle", "surface-sunken"] as const) {
+        const ratio = contrastRatio(token(tokens, "text-faint"), token(tokens, bg));
+        expect(
+          ratio,
+          `--text-faint on --${bg} (${theme}) must be ≥ ${AA_TEXT.toFixed(1)}:1, got ${ratio.toFixed(2)}:1`,
+        ).toBeGreaterThanOrEqual(AA_TEXT);
+      }
     },
   );
 
