@@ -1081,6 +1081,17 @@ mod tests {
     #[test]
     fn bench_200_line_cart_loose_threshold() {
         use std::time::Instant;
+        // Median-of-N (11 runs): each run times a batch of iterations and
+        // records the per-cart time; the median is robust to load spikes
+        // (a single slow run from parallel nextest load cannot move it).
+        // The 1-line cart is timed the same way, in the same run, so both
+        // measurements see the same load — the ratio between them is
+        // load-invariant. The 1-line batch is larger (1000 iterations)
+        // because it is ~200x faster, so timer granularity does not
+        // dominate it.
+        const RUNS: usize = 11;
+        const BATCH_200: u32 = 100;
+        const BATCH_1: u32 = 1000;
         let mut rng = Lcg::new(0x001A_B00C);
         let mut lines: Vec<LineInput> = Vec::with_capacity(200);
         for _ in 0..200 {
@@ -1093,34 +1104,57 @@ mod tests {
         }
         lines.truncate(200);
         let bill_discount = BillDiscount::Percent(rate(1000));
-        // Warm up once so the timed loop measures steady state.
+        // Warm up once so the timed runs measure steady state.
         let _ = price_cart(&lines, &bill_discount, 2).expect("bench cart prices");
-        let iterations: u32 = 500;
-        let start = Instant::now();
-        for _ in 0..iterations {
-            let _ = price_cart(&lines, &bill_discount, 2).expect("bench cart prices");
+        let one_line = std::slice::from_ref(lines.first().expect("200-line cart has a first line"));
+        let _ = price_cart(one_line, &bill_discount, 2).expect("bench cart prices");
+        let mut per_cart_200: Vec<u128> = Vec::with_capacity(RUNS);
+        let mut per_cart_1: Vec<u128> = Vec::with_capacity(RUNS);
+        for _ in 0..RUNS {
+            let start = Instant::now();
+            for _ in 0..BATCH_200 {
+                let _ = price_cart(&lines, &bill_discount, 2).expect("bench cart prices");
+            }
+            per_cart_200.push(start.elapsed().as_nanos() / u128::from(BATCH_200));
+            let start = Instant::now();
+            for _ in 0..BATCH_1 {
+                let _ = price_cart(one_line, &bill_discount, 2).expect("bench cart prices");
+            }
+            per_cart_1.push(start.elapsed().as_nanos() / u128::from(BATCH_1));
         }
-        let elapsed = start.elapsed();
-        let mean_ns = elapsed.as_nanos() / u128::from(iterations);
-        eprintln!("bench 200-line cart: mean {mean_ns} ns per cart over {iterations} iterations");
-        // Loose absolute bound: millisecond order per cart. Measured on
-        // this machine: ~0.62 ms in debug (sub-millisecond order),
-        // ~0.06 ms in release. The bound is deliberately 3x the debug
-        // mean so a slow shared CI runner does not flake.
-        assert!(
-            mean_ns < 2_000_000,
-            "200-line cart pricing took {mean_ns} ns per cart, over the 2 ms loose bound"
+        per_cart_200.sort_unstable();
+        per_cart_1.sort_unstable();
+        let median_200 = *per_cart_200.get(RUNS / 2).expect("11 runs recorded");
+        let median_1 = *per_cart_1.get(RUNS / 2).expect("11 runs recorded");
+        eprintln!(
+            "bench 200-line cart: median {median_200} ns per cart over {RUNS} runs of {BATCH_200} iterations; 1-line median {median_1} ns; ratio {}x",
+            median_200 / median_1.max(1)
         );
-        // Relative tripwire vs the stored baseline (spec 002 pattern): fail
-        // only on a > 5x regression, so a slow CI runner does not flake.
+        // Relative tripwire vs the stored baseline (spec 002 pattern),
+        // applied to the MEDIAN: fail only on a > 5x regression, so a
+        // slow CI runner does not flake. The baseline stores a mean; the
+        // median of the same workload is close to its mean, and the 5x
+        // tolerance absorbs the difference. (The old absolute 2 ms bound
+        // is gone: it flaked under parallel nextest load on the shared
+        // VM — mean 2.15 ms and 2.55 ms vs the 2 ms bound — while the
+        // isolated time is 0.33–0.76 ms.)
         let baseline: Baseline =
             serde_json::from_str(include_str!("../baseline/pricing-baseline.json"))
                 .expect("baseline parses");
         let allowed = u128::from(baseline.mean_ns_per_cart) * 5;
         assert!(
-            mean_ns <= allowed,
-            "200-line cart pricing {mean_ns} ns exceeds 5x baseline {} ns",
+            median_200 <= allowed,
+            "200-line cart pricing median {median_200} ns exceeds 5x baseline {} ns",
             baseline.mean_ns_per_cart
+        );
+        // Relative check in the same process: both carts slow down
+        // together under load, so the ratio is load-invariant. A 200-line
+        // cart is ~200x the work of a 1-line cart; 1000x is generous
+        // headroom and catches a quadratic blowup (which would be
+        // ~40,000x) without flaking.
+        assert!(
+            median_200 <= median_1.saturating_mul(1000),
+            "200-line cart median {median_200} ns exceeds 1000x the 1-line median {median_1} ns"
         );
     }
 }

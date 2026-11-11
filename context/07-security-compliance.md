@@ -25,6 +25,12 @@ Append-only, tamper-evident (hash chain: each row stores hash of previous row). 
 - Secrets never in source, config files, logs, or UI bundles.
 - Logs contain no PII, no payment data, no PINs.
 
+### Key management (current state, 2026-11-11)
+- Tests: `Db::open` takes `key: Option<&[u8]>` — the key is passed in by the caller. Tests use a hardcoded test key (`b"test-key-32-bytes-long-0123456789"`, `crates/db/tests/actor.rs`); the seed test uses `Db::open_in_memory()` (no key — unencrypted in-memory DB). No test/dev key is a real key.
+- Dev: no key — no production/dev caller of `Db::open` exists outside tests yet; no key wiring exists. The dev DB is unencrypted.
+- Production: the key is generated per install and sealed with Windows DPAPI, with a recovery key shown once to the owner (see above) — but that flow is NOT yet designed or built. The DPAPI key sealing + recovery key spec is a pre-pilot item (see the tracker). Do not invent a production key flow before that spec lands.
+- CI proves no test/dev key or dev-seed PIN reaches a release build: the build-windows job greps the release exe for the dev-seed marker (`SHOPCORE_DEV_SEED_MARKER_V1`, which covers the seed PINs 1234/4321 — they live in the seed file alongside the marker) and for the test key string, and fails if either is found.
+
 ## Tauri/WebView hardening
 - Strict CSP, no remote content, no `eval`; UI assets bundled.
 - Tauri capabilities allowlist: only the commands the UI needs; deny filesystem/shell access from the webview.

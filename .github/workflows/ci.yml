@@ -156,16 +156,23 @@ jobs:
       - name: Build Windows app
         run: just build
 
-      # Spec 001b-1 req. 11 (release-absence test): the dev seed is behind
-      # the `dev-seed` cargo feature, which no release profile enables.
-      # The seed marker string (SHOPCORE_DEV_SEED_MARKER_V1) exists only
-      # in the seed module — if it is found in the release binary, the
-      # feature leaked into a release build and this step fails.
-      - name: Verify dev-seed marker is absent from release binary
+      # Spec 001b-1 req. 11 (release-absence test) + key management
+      # (2026-11-11): the dev seed is behind the `dev-seed` cargo
+      # feature, which no release profile enables. The seed marker
+      # string (SHOPCORE_DEV_SEED_MARKER_V1) exists only in the seed
+      # module — if it is found in the release binary, the feature
+      # leaked into a release build and this step fails. The seed PINs
+      # (1234 cashier / 4321 manager) live in the seed file alongside
+      # the marker, so the marker grep covers them (the PINs themselves
+      # are too short/generic to grep for reliably). The test DB key
+      # string (test-key-32-bytes-long-0123456789) is unique, so it is
+      # grepped directly — it must never reach a release build either.
+      - name: Verify dev-seed marker and test key are absent from release binary
         run: |
           $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes("target/release/shopcore-desktop.exe"))
           if ($text.Contains("SHOPCORE_DEV_SEED_MARKER_V1")) { throw "dev-seed marker found in release binary — the dev-seed feature leaked into a release build" }
-          Write-Host "dev-seed marker absent from release binary"
+          if ($text.Contains("test-key-32-bytes-long-0123456789")) { throw "test DB key found in release binary — a test key leaked into a release build" }
+          Write-Host "dev-seed marker and test DB key absent from release binary"
 
       - name: Upload Windows exe + installer
         uses: actions/upload-artifact@v4
