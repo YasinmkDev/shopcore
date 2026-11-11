@@ -22,5 +22,5 @@ export default tseslint.config(
     // event payload types land with the specs that emit them).
     rules: { "@typescript-eslint/no-empty-object-type": ["error", { allowInterfaces: "always" }] },
   },
-  { ignores: ["dist", "node_modules"] },
+  { ignores: ["dist", "node_modules", "public"] },
 );

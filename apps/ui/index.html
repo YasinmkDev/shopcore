@@ -7,6 +7,10 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- External sync script (never inline — CSP forbids 'unsafe-inline'):
+         sets data-theme before the first React render, so the first paint
+         uses the right theme. See public/theme-init.js. -->
+    <script src="/theme-init.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

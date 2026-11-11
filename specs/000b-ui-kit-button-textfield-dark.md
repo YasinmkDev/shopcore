@@ -53,9 +53,15 @@ change, any DB change.
    `localStorage` key `shopcore.theme`. Moving to the core settings store
    later is a one-file change (swap the backing store, not the call sites).
 8. `data-theme` is set synchronously before the first React render (no
-   flash of the wrong theme): a tiny inline script in `index.html` (or the
-   equivalent entry point) reads the stored setting and sets the attribute
-   before React mounts.
+   flash of the wrong theme): an EXTERNAL synchronous script (a separate
+   `.js` file loaded with a plain `<script src="...">` before the module
+   script) that reads the stored setting and sets the attribute before
+   React mounts. NEVER an inline script. (A CSP hash is the only
+   alternative; inline is forbidden.) The CSP in
+   `crates/desktop/src-tauri/tauri.conf.json` must never allow
+   `'unsafe-inline'` in `script-src` (nor in `default-src`, its fallback)
+   — a test asserts this, and a second test asserts `apps/ui/index.html`
+   contains no inline `<script>` tag.
 9. The scaffold Shell migrates its raw Ping `<button>` to `Button`
    (primary, loading state while pinging) and gains a Light/Dark/Auto
    control built from the new components, proving the wiring end to end.
@@ -82,13 +88,15 @@ change, any DB change.
     layout/shared-element animations or springs; fades/slides kept),
     2 (minimal, p95 > 33 ms — opacity-only, ≤ 100 ms). OS
     `prefers-reduced-motion` forces tier 2. The hook sets a `data-motion`
-    attribute (`full` / `reduced` / `minimal`) on the app root. A basic
-    rAF frame-time sampler measures p95 over the first 60 frames after
-    startup and during the first transitions. User override
-    (Full / Reduced / Off) lives in Settings → Appearance → Motion and is
-    stored per terminal behind the same `SettingsStore` interface. No
-    component decides the tier on its own. Spec 001c's payment panel
-    needs this hook.
+    attribute (`full` / `reduced` / `minimal`) on the app root. Sampling
+    rules: start sampling only after first idle (window `load` event +
+    ~1 s); a tier downgrade requires TWO consecutive bad windows (a
+    window = the rAF frame-time sample over ~60 frames); the tier is
+    persisted per terminal behind the same `SettingsStore` interface
+    (restored on load); a manual override (Full / Reduced / Off, in
+    Settings → Appearance → Motion) always wins over the sampler and
+    over the persisted auto tier. No component decides the tier on its
+    own. Spec 001c's payment panel needs this hook.
 
 ## Business rules touched (link to `context/02-domain-model.md` sections)
 None. No money, pricing, tax, stock or sale rule is involved.
@@ -135,7 +143,18 @@ sensitive actions.
 - `useMotionTier` unit tests: tier 0 at p95 ≤ 20 ms, tier 1 at p95 > 20 ms,
   tier 2 at p95 > 33 ms, `prefers-reduced-motion` forces tier 2, user
   override (Full/Reduced/Off) wins over the sampler, `data-motion`
-  attribute set on the root.
+  attribute set on the root. Sampling-rule tests: no sampling before
+  first idle (window `load` + ~1 s), a single bad window does NOT
+  downgrade (two consecutive bad windows required), the tier persists
+  per terminal and restores on load, a manual override wins over the
+  persisted auto tier.
+- CSP test: the CSP in `crates/desktop/src-tauri/tauri.conf.json` never
+  contains `'unsafe-inline'` in `script-src` (nor in `default-src`);
+  `apps/ui/index.html` contains no inline `<script>` tag. (Scope note:
+  `style-src` keeps `'unsafe-inline'` for Vite dev HMR style injection;
+  the test is scoped to script execution, which is what the data-theme
+  init rule is about. If the owner wants it removed from `style-src`
+  too, that is a separate decision — it would break Vite dev styling.)
 - RTL render test (`dir="rtl"`) for both components.
 - AA contrast checks computed from the token values (not eyeballed),
   covering EVERY text/background pair in both themes: text, text-muted,
@@ -172,9 +191,15 @@ sensitive actions.
 ## Risks / open questions
 - Q1: RESOLVED (approved 2026-11-10) — `SettingsStore` interface backed by
   `localStorage` in 000b; core settings store later is a one-file change.
+  AMENDED 2026-11-10: the data-theme init is an external synchronous
+  script or a CSP hash, NEVER inline; a test asserts the CSP never
+  allows `'unsafe-inline'` in `script-src`.
 - Q2: RESOLVED (approved 2026-11-10) — high contrast out, separate spec.
 - Q3: RESOLVED (approved 2026-11-10, reversed) — `useMotionTier` IS in
-  000b (requirement 15); spec 001c's payment panel needs it.
+  000b (requirement 15); spec 001c's payment panel needs it. AMENDED
+  2026-11-10: sampling starts after first idle (window load + ~1 s),
+  two consecutive bad windows required before downgrading, tier
+  persisted per terminal, manual override still wins; unit-test these.
 - Q4: RESOLVED (approved 2026-11-10) — `@fontsource-variable/inter`
   5.3.0, Latin subsets only, OFL text ships, woff2 sizes reported. If
   5.3.0 does not resolve, STOP and ask; do not substitute a version.

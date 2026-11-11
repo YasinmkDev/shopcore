@@ -17,6 +17,7 @@
   --color-surface-sunken: var(--surface-sunken);
   --color-border: var(--border);
   --color-border-strong: var(--border-strong);
+  --color-border-input: var(--border-input);
   --color-text: var(--text);
   --color-muted: var(--text-muted);
   --color-faint: var(--text-faint);
@@ -38,13 +39,34 @@
   --radius: var(--radius);
   --radius-lg: var(--radius-lg);
   --shadow-pop: var(--shadow-pop);
+  /* Motion durations (tokens.css) -> `duration-*` utilities. */
+  --transition-duration-instant: var(--dur-instant);
+  --transition-duration-fast: var(--dur-fast);
+  --transition-duration-base: var(--dur-base);
+  --transition-duration-slow: var(--dur-slow);
+}
+
+/* Inter Variable, Latin subset ONLY (spec 000b). The @fontsource-variable
+   package's index.css/wght.css declare every subset (cyrillic, greek,
+   vietnamese, …), so the Latin @font-face is declared here instead —
+   copied verbatim from the package's wght.css latin block, with the URL
+   rewritten to the package file. Only inter-latin-wght-normal.woff2
+   (48,256 bytes) ships. The OFL license text ships as public/inter-OFL.txt. */
+@font-face {
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2")
+    format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
 body {
   background: var(--bg);
   color: var(--text);
-  /* Inter is bundled locally per 10-ui-system.md; that lands with spec 000b.
-     Until then the system stack applies. */
-  font-family: system-ui, "Segoe UI", sans-serif;
+  font-family: "Inter Variable", system-ui, "Segoe UI", sans-serif;
   font-variant-numeric: tabular-nums;
 }
