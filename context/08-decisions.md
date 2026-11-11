@@ -119,6 +119,17 @@ CI run 42857202536: the new `server-tests` job failed — on its fresh Postgres,
 ## ADR-029 — Phase 0 benchmark gate deferred by the owner. Accepted 2026-11-10
 The Phase 0 benchmark gate no longer blocks development. Reason: no weak-spec PC is available, so the full Windows benchmark (scenarios 7–8, 500k snapshot, checkout under sync) cannot run on the target machine. Risk: Tauri/WebView2 weight and startup on weak PCs are unmeasured. Mitigations: the `CoreClient` boundary keeps the shell replaceable (ADR-002 fallback stays valid — Electron sidecar with the Rust core); budgets stay enforced by the CI bench-smoke tripwire (relative regression check vs the stored baseline). Hard checkpoint: the full Windows benchmark MUST run before the real-shop pilot (Phase 4) at the latest. Do not remove the benchmark tooling (spec 002 harness, `shopcore-bench.exe`, RUN.md, debug route).
 
+## ADR-031 — Migrations may be squashed/rewritten until the first customer install. Accepted 2026-11-10
+Migrations may be squashed or rewritten while the product has no customer
+install (development only). After the FIRST customer install, migrations
+are STRICTLY forward-only: never edited, only new numbered migrations.
+Rationale: the schema is still settling during 001b-1/001b-2 (tables are
+being dropped and added per the 001 flow), and rewriting a migration no
+customer has run is safe. Once a customer has run a migration, editing it
+would diverge their database from the code. The cut-over is the first
+customer install, not a version number — the release that ships to the
+first customer freezes the migration history.
+
 ## ADR-030 — Scanner events use `tokio::sync::mpsc`, not `Stream`. Accepted 2026-11-10
 `06-hardware-integrations.md` sketches `BarcodeScanner::events() -> Stream<ScanEvent>`, but neither `futures` nor `tokio-stream` is a workspace dependency (only transitive `futures-core`/`futures-util` in the lockfile). Decision: scanner events are delivered over a `tokio::sync::mpsc::Receiver<ScanEvent>` — no new dependency (tokio `sync` feature is already enabled). The `06` sketch is updated to match. If a `Stream` API is ever needed (e.g. combinators over the event flow), adding `tokio-stream` is a new ADR with its own dependency proof.
 
