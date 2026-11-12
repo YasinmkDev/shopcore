@@ -3616,6 +3616,7 @@ dependencies = [
  "serde_json",
  "shopcore-core",
  "shopcore-db",
+ "shopcore-domain",
  "shopcore-hardware",
  "shopcore-protocol",
  "tauri",

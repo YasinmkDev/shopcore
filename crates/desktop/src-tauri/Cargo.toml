@@ -21,6 +21,10 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 shopcore-core = { workspace = true }
 shopcore-db = { path = "../../db", version = "0.1.0" }
+# shopcore-domain at the IPC boundary (001c-2): the desktop parses the
+# discount kind/value into the domain `LineDiscount` before calling the
+# use case. Workspace dependency, not a new one.
+shopcore-domain = { workspace = true }
 shopcore-hardware = { path = "../../hardware", version = "0.1.0" }
 shopcore-protocol = { workspace = true }
 

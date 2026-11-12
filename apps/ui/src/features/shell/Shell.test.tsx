@@ -30,6 +30,9 @@ function makeClient(outcome: Pong | Error): CoreClient {
     draftRemoveLine: () => never(),
     draftCancel: () => never(),
     draftRestoreLine: () => never(),
+    draftApplyDiscount: () => never(),
+    completeSaleCash: () => never(),
+    reprintReceipt: () => never(),
     subscribe: () => () => {
       /* no events in these tests */
     },

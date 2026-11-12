@@ -204,6 +204,17 @@ class FakeClient implements CoreClient {
     }
     return Promise.resolve(this.view());
   });
+  /** 001c-2: no discount/payment behaviour in this fake yet — CP3
+   * wires the components and gives these fakes real behaviour. */
+  draftApplyDiscount = vi.fn(() =>
+    Promise.reject(new Error("discount not implemented in this fake")),
+  );
+  completeSaleCash = vi.fn(() =>
+    Promise.reject(new Error("payment not implemented in this fake")),
+  );
+  reprintReceipt = vi.fn(() =>
+    Promise.reject(new Error("reprint not implemented in this fake")),
+  );
   subscribe = vi.fn(() => () => {
     /* no events in these tests */
   });

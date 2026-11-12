@@ -254,6 +254,18 @@ pub struct ReceiptDto {
     pub footer: Vec<String>,
 }
 
+/// The outcome of a receipt reprint (spec 001c-2): what
+/// `reprint_receipt` returns, as the completion view renders it.
+/// The reprint itself is an audit event (`receipt.reprint`, 07).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ReprintDto {
+    /// The sale id.
+    pub sale_id: String,
+    /// `true` once the print attempt succeeded; `false` while the
+    /// receipt is still queued (printer offline).
+    pub printed: bool,
+}
+
 /// A completed cash sale (spec 001c-2): what `complete_sale_cash`
 /// returns, as the payment panel's completion view renders it. The
 /// receipt is the queued `PrintDoc`; `receipt_queued` is `false`

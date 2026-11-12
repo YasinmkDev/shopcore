@@ -18,18 +18,23 @@
 //! `draft_add_line`, `draft_set_qty`, `draft_remove_line`,
 //! `draft_cancel`, `draft_restore_line` — plus the read commands the
 //! sell screen needs on mount (`get_session`, `get_status`, `get_cart`).
-//! `draft_apply_discount` and `complete_sale_cash` land in 001c-2 (the
-//! ADR-013 drift guard requires a UI caller for every command, and
-//! those two have no UI caller until then).
+//! Spec 001c-2 commands: `draft_apply_discount`, `complete_sale_cash`,
+//! `reprint_receipt`. The e2e shim (also 001c-2, `e2e.rs`) calls the
+//! same `*_impl` functions — one dispatch table, no second API.
 
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use shopcore_core::draft::{
-    draft_add_line as core_draft_add_line, draft_cancel as core_draft_cancel,
-    draft_remove_line as core_draft_remove_line, draft_restore_line as core_draft_restore_line,
-    draft_set_qty as core_draft_set_qty, load_draft, open_draft,
+    draft_add_line as core_draft_add_line, draft_apply_discount as core_draft_apply_discount,
+    draft_cancel as core_draft_cancel, draft_remove_line as core_draft_remove_line,
+    draft_restore_line as core_draft_restore_line, draft_set_qty as core_draft_set_qty, load_draft,
+    open_draft,
+};
+use shopcore_core::sale::{
+    CompleteSaleCashInput, PrintStatus, SaleCompleted, SaleError, attempt_print,
+    complete_sale_cash as core_complete_sale_cash, reprint_receipt as core_reprint_receipt,
 };
 use shopcore_core::search::{
     PrefixIndex, lookup_barcode as core_lookup_barcode, search_skus as core_search_skus,
@@ -39,16 +44,19 @@ use shopcore_core::settings::{
     KEY_TENANT_CURRENCY, KEY_TENANT_CURRENCY_EXPONENT, SCOPE_TENANT, get_setting, get_setting_i64,
 };
 use shopcore_core::shift::open_shift_id;
+use shopcore_core::users::get_user_by_id;
 #[cfg(feature = "dev-session")]
 use shopcore_core::users::get_user_by_username;
 use shopcore_core::{Core, CoreError, price_draft_cart};
 use shopcore_db::Db;
+use shopcore_domain::{LineDiscount, Money, Rate};
 use shopcore_hardware::MockPrinter;
 use shopcore_protocol::{
-    CartLineDto, CartTotalsDto, CartViewDto, Pong, SampleBarcodeDto, SessionDto, SkuHitDto,
-    StatusDto,
+    CartLineDto, CartTotalsDto, CartViewDto, Pong, ReceiptDto, ReceiptLineDto, ReceiptPaymentDto,
+    ReprintDto, SaleCompletedDto, SaleCompletedPayload, SampleBarcodeDto, SessionDto, SkuHitDto,
+    StatusDto, yyyymmdd_utc,
 };
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[cfg(feature = "dev-session")]
 use rusqlite::OptionalExtension;
@@ -117,6 +125,16 @@ impl From<CoreError> for AppError {
 
 impl From<shopcore_core::search::SearchError> for AppError {
     fn from(err: shopcore_core::search::SearchError) -> Self {
+        Self::new(err.code(), err.to_string())
+    }
+}
+
+/// A sale/draft use-case error keeps its stable code
+/// (`SaleError::code` — `DISCOUNT_NEEDS_APPROVAL`,
+/// `INSUFFICIENT_TENDER`, `SHIFT_NOT_OPEN`, `TAX_GROUP_NOT_FOUND`,
+/// …) so the UI maps it to a localized message.
+impl From<SaleError> for AppError {
+    fn from(err: SaleError) -> Self {
         Self::new(err.code(), err.to_string())
     }
 }
@@ -258,7 +276,12 @@ pub struct AppState {
     core: Core,
     session: Option<Session>,
     search_index: Mutex<PrefixIndex>,
-    printer: Mutex<MockPrinter>,
+    /// The mock printer behind an async mutex (001c-2): the print
+    /// attempt is awaited, and a `std::sync::MutexGuard` is not
+    /// `Send`, so it cannot be held across the await in an async
+    /// Tauri command. The status read uses `try_lock` with the same
+    /// `"unknown"` fallback the poisoned-lock path had.
+    printer: tokio::sync::Mutex<MockPrinter>,
 }
 
 impl AppState {
@@ -271,7 +294,7 @@ impl AppState {
             core,
             session,
             search_index: Mutex::new(PrefixIndex::new()),
-            printer: Mutex::new(MockPrinter::new()),
+            printer: tokio::sync::Mutex::new(MockPrinter::new()),
         }
     }
 
@@ -420,7 +443,7 @@ fn get_status_impl(state: &AppState) -> Result<StatusDto, AppError> {
     };
     let printer_status = state
         .printer
-        .lock()
+        .try_lock()
         .map_or("unknown".to_string(), |printer| {
             if printer.is_offline() {
                 "offline".to_string()
@@ -555,6 +578,238 @@ fn draft_restore_line_impl(state: &AppState, draft_id: &str) -> Result<CartViewD
     state.cart_view(draft_id)
 }
 
+/// Parse the discount the UI sends: `kind` is `"percent"` (value =
+/// basis points, 0–10000) or `"fixed"` (value = minor units, ≥ 0).
+/// Boundary validation — the use case never sees an unparseable
+/// discount.
+fn parse_line_discount(kind: &str, value: i64) -> Result<LineDiscount, AppError> {
+    match kind {
+        "percent" => {
+            let bps = u32::try_from(value).map_err(|_| {
+                AppError::new(
+                    "INVALID_INPUT",
+                    format!("percent discount {value} is out of range"),
+                )
+            })?;
+            Rate::from_basis_points(bps)
+                .map(LineDiscount::Percent)
+                .map_err(|err| AppError::new("DOMAIN_ERROR", err.to_string()))
+        }
+        "fixed" => {
+            if value < 0 {
+                return Err(AppError::new(
+                    "INVALID_INPUT",
+                    format!("fixed discount {value} must not be negative"),
+                ));
+            }
+            Ok(LineDiscount::Fixed(Money::from_minor(value)))
+        }
+        _ => Err(AppError::new(
+            "INVALID_INPUT",
+            format!("unknown discount kind {kind:?}"),
+        )),
+    }
+}
+
+/// Apply a line discount (spec 001c-2): the cashier is the session's
+/// user; above the cashier's threshold the call needs a manager
+/// username + PIN, and without them it fails with
+/// `DISCOUNT_NEEDS_APPROVAL` (the UI then shows the PIN fields and
+/// retries). Returns the priced cart.
+#[allow(clippy::too_many_arguments)]
+fn draft_apply_discount_impl(
+    state: &AppState,
+    draft_id: &str,
+    line_id: &str,
+    kind: &str,
+    value: i64,
+    manager_username: Option<&str>,
+    manager_pin: Option<&str>,
+) -> Result<CartViewDto, AppError> {
+    check_safe_integer(value)?;
+    let discount = parse_line_discount(kind, value)?;
+    let session = state.require_session()?;
+    let cashier_id = session.user_id.as_deref().ok_or_else(|| {
+        AppError::new(
+            "SESSION_REQUIRED",
+            "no cashier signed in — sign-in lands in spec 001d".to_string(),
+        )
+    })?;
+    let cashier =
+        get_user_by_id(state.core.db(), &session.tenant_id, cashier_id)?.ok_or_else(|| {
+            AppError::new("NOT_FOUND", format!("cashier {cashier_id} does not exist"))
+        })?;
+    let approver = match (manager_username, manager_pin) {
+        (Some(username), Some(pin)) => Some((username, pin)),
+        (None, None) => None,
+        _ => {
+            return Err(AppError::new(
+                "INVALID_INPUT",
+                "manager username and PIN must be given together".to_string(),
+            ));
+        }
+    };
+    core_draft_apply_discount(
+        state.core.db(),
+        state.core.scratch(),
+        draft_id,
+        line_id,
+        discount,
+        &cashier,
+        approver,
+        now_ms(),
+    )?;
+    state.cart_view(draft_id)
+}
+
+/// Map a committed sale + the print attempt's outcome to the DTO the
+/// completion view renders. `receipt_queued` is `false` once the
+/// print attempt after the commit succeeded.
+fn sale_completed_dto(
+    completed: &SaleCompleted,
+    receipt_queued: bool,
+) -> Result<SaleCompletedDto, AppError> {
+    for total in [
+        completed.total_minor,
+        completed.change_minor,
+        completed.rounding_line_minor,
+    ] {
+        check_safe_integer(total)?;
+    }
+    let doc = &completed.print_doc;
+    let tender_minor = doc
+        .payments
+        .first()
+        .map_or(0, |payment| payment.amount_minor);
+    check_safe_integer(tender_minor)?;
+    Ok(SaleCompletedDto {
+        sale_id: completed.sale_id.clone(),
+        receipt_no: completed.receipt_no.clone(),
+        total_minor: completed.total_minor,
+        change_minor: completed.change_minor,
+        rounding_line_minor: completed.rounding_line_minor,
+        receipt_queued,
+        already_completed: completed.already_completed(),
+        receipt: ReceiptDto {
+            receipt_no: completed.receipt_no.clone(),
+            header: doc.header.clone(),
+            lines: doc
+                .lines
+                .iter()
+                .map(|line| ReceiptLineDto {
+                    name: line.name.clone(),
+                    qty_milli: line.qty_milli,
+                    unit_price_e4: line.unit_price_e4,
+                    line_total_minor: line.line_total_minor,
+                })
+                .collect(),
+            subtotal_minor: doc.subtotal_minor,
+            net_subtotal_minor: doc.net_subtotal_minor,
+            discount_minor: doc.discount_minor,
+            tax_minor: doc.tax_minor,
+            total_minor: doc.total_minor,
+            tender_minor,
+            change_minor: completed.change_minor,
+            rounding_line_minor: completed.rounding_line_minor,
+            payments: doc
+                .payments
+                .iter()
+                .map(|payment| ReceiptPaymentDto {
+                    method: payment.method.clone(),
+                    amount_minor: payment.amount_minor,
+                })
+                .collect(),
+            footer: doc.footer.clone(),
+        },
+    })
+}
+
+/// Complete a cash sale (spec 001c-2): one transaction in the core,
+/// then the print attempt — hardware never blocks the commit, so a
+/// failed/offline print leaves the receipt queued (the UI shows the
+/// "Printer offline — receipt queued" banner) and the sale stands.
+/// Idempotent per `draft_id`: a replay returns the ORIGINAL sale,
+/// unchanged, with `already_completed: true`.
+async fn complete_sale_cash_impl(
+    state: &AppState,
+    draft_id: &str,
+    tender_minor: i64,
+) -> Result<SaleCompletedDto, AppError> {
+    check_safe_integer(tender_minor)?;
+    if tender_minor < 0 {
+        return Err(AppError::new(
+            "INVALID_INPUT",
+            format!("tender {tender_minor} must not be negative"),
+        ));
+    }
+    let session = state.require_session()?;
+    let shift_id = session.shift_id.clone().ok_or_else(|| {
+        AppError::new(
+            "SHIFT_NOT_OPEN",
+            "no shift is open on this terminal".to_string(),
+        )
+    })?;
+    let user_id = session.user_id.clone().ok_or_else(|| {
+        AppError::new(
+            "SESSION_REQUIRED",
+            "no cashier signed in — sign-in lands in spec 001d".to_string(),
+        )
+    })?;
+    let now = now_ms();
+    let input = CompleteSaleCashInput {
+        tenant_id: session.tenant_id.clone(),
+        branch_id: session.branch_id.clone(),
+        terminal_id: session.terminal_id.clone(),
+        branch_code: session.branch_code.clone(),
+        terminal_code: session.terminal_code.clone(),
+        shift_id,
+        user_id,
+        draft_id: draft_id.to_string(),
+        tender_minor,
+        now_ms: now,
+        date_yyyymmdd: yyyymmdd_utc(now),
+    };
+    let completed = core_complete_sale_cash(state.core.db(), state.core.scratch(), input, None)?;
+    // The print attempt runs AFTER the commit (hardware never blocks
+    // it). Any failure — offline, or any other print error — leaves
+    // the job queued for retry; the sale itself already succeeded.
+    let print_status = {
+        let mut printer = state.printer.lock().await;
+        attempt_print(state.core.db(), &completed.print_job_id, &mut *printer).await
+    };
+    let receipt_queued = !matches!(print_status, Ok(PrintStatus::Printed));
+    sale_completed_dto(&completed, receipt_queued)
+}
+
+/// Reprint a sale's receipt (spec 001c-2, req. 4): attempts the
+/// print for the sale's latest `print_job`; the core writes a
+/// `receipt.reprint` audit row. Returns whether the receipt printed.
+async fn reprint_receipt_impl(state: &AppState, sale_id: &str) -> Result<ReprintDto, AppError> {
+    let session = state.require_session()?;
+    let user_id = session.user_id.clone().ok_or_else(|| {
+        AppError::new(
+            "SESSION_REQUIRED",
+            "no cashier signed in — sign-in lands in spec 001d".to_string(),
+        )
+    })?;
+    let status = {
+        let mut printer = state.printer.lock().await;
+        core_reprint_receipt(
+            state.core.db(),
+            sale_id,
+            &user_id,
+            &session.terminal_id,
+            &mut *printer,
+            now_ms(),
+        )
+        .await?
+    };
+    Ok(ReprintDto {
+        sale_id: sale_id.to_string(),
+        printed: status == PrintStatus::Printed,
+    })
+}
+
 /// The session the sell screen works as (`None` until sign-in lands in
 /// 001d, except in dev where the auto-session fills it).
 #[tauri::command]
@@ -684,6 +939,67 @@ fn draft_restore_line(
     draft_restore_line_impl(&state, &draft_id)
 }
 
+/// Apply a line discount and return the priced cart. Above the
+/// cashier's threshold the call needs a manager username + PIN;
+/// without them it fails with `DISCOUNT_NEEDS_APPROVAL`.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+fn draft_apply_discount(
+    state: State<'_, AppState>,
+    draft_id: String,
+    line_id: String,
+    kind: String,
+    value: i64,
+    manager_username: Option<String>,
+    manager_pin: Option<String>,
+) -> Result<CartViewDto, AppError> {
+    draft_apply_discount_impl(
+        &state,
+        &draft_id,
+        &line_id,
+        &kind,
+        value,
+        manager_username.as_deref(),
+        manager_pin.as_deref(),
+    )
+}
+
+/// Complete a cash sale and return the completed sale (with the
+/// receipt preview). Emits `sale.completed` after a successful
+/// commit — the first emission of that event (the type landed in
+/// 001c-1).
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+async fn complete_sale_cash(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    draft_id: String,
+    tender_minor: i64,
+) -> Result<SaleCompletedDto, AppError> {
+    let completed = complete_sale_cash_impl(&state, &draft_id, tender_minor).await?;
+    // Best-effort: no listener yet is fine (the completion view is
+    // driven by this command's return value).
+    let _ = app.emit(
+        "sale.completed",
+        SaleCompletedPayload {
+            sale_id: completed.sale_id.clone(),
+            receipt_no: completed.receipt_no.clone(),
+            total_minor: completed.total_minor,
+        },
+    );
+    Ok(completed)
+}
+
+/// Reprint a sale's receipt and return whether it printed.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+async fn reprint_receipt(
+    state: State<'_, AppState>,
+    sale_id: String,
+) -> Result<ReprintDto, AppError> {
+    reprint_receipt_impl(&state, &sale_id).await
+}
+
 /// Open the databases and build the managed state: the `DB` + scratch
 /// `DB` under the app data dir (`%AppData%/ShopCore` on Windows),
 /// one [`Core`], and the session (dev auto-session with the
@@ -748,7 +1064,10 @@ fn main() {
             draft_set_qty,
             draft_remove_line,
             draft_cancel,
-            draft_restore_line
+            draft_restore_line,
+            draft_apply_discount,
+            complete_sale_cash,
+            reprint_receipt
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|err| {
@@ -776,6 +1095,7 @@ mod tests {
         KEY_ACTIVE_PRICE_LIST, KEY_TENANT_CURRENCY, KEY_TENANT_CURRENCY_EXPONENT, SCOPE_TENANT,
         set_setting,
     };
+    use shopcore_core::users::{create_role, create_user};
     use shopcore_core::{Core, ScratchDb};
     use shopcore_db::Db;
 
@@ -800,7 +1120,13 @@ mod tests {
                     {
                         continue;
                     }
-                    if let Some(rest) = next.strip_prefix("fn ") {
+                    // Sync commands start `fn name(`, async ones
+                    // `async fn name(` (001c-2: the async commands were
+                    // invisible to the guard until this matched them).
+                    if let Some(rest) = next
+                        .strip_prefix("fn ")
+                        .or_else(|| next.strip_prefix("async fn "))
+                    {
                         let name: String = rest.chars().take_while(|c| *c != '(').collect();
                         out.insert(name.trim().to_string());
                     }
@@ -957,11 +1283,15 @@ mod tests {
         state: AppState,
         _dir: TempDirGuard,
         sku_id: String,
+        sku_tst44_id: String,
     }
 
     /// Seed a minimal catalog (one 18%-exclusive group, one SKU with
-    /// a barcode + price) and return `(price_list_id, sku_id)`.
-    fn seed_test_catalog(db: &Db) -> (String, String) {
+    /// a barcode + price) and return
+    /// `(price_list_id, sku_id, sku_tst44_id)`. `TST44` (44.34 @18%)
+    /// is the 001a cash acceptance: one unit totals exactly 5232
+    /// minor (total 52.32, tender 60.00, change 7.68).
+    fn seed_test_catalog(db: &Db) -> (String, String, String) {
         let tenant = "test-tenant".to_string();
         let tenant_c = tenant.clone();
         let price_list_id = uuid::Uuid::now_v7().to_string();
@@ -972,6 +1302,10 @@ mod tests {
         let sku_id_c = sku_id.clone();
         let item_id = uuid::Uuid::now_v7().to_string();
         let item_id_c = item_id.clone();
+        let tst44_item_id = uuid::Uuid::now_v7().to_string();
+        let tst44_item_id_c = tst44_item_id.clone();
+        let tst44_sku_id = uuid::Uuid::now_v7().to_string();
+        let tst44_sku_id_c = tst44_sku_id.clone();
         db.write(move |conn| {
                 let tx = conn.transaction().expect("tx");
                 tx.execute(
@@ -1014,11 +1348,96 @@ mod tests {
                     rusqlite::params![uuid::Uuid::now_v7().to_string(), tenant_c, price_list_id_c, sku_id_c],
                 )
                 .expect("price entry");
+                tx.execute(
+                    "INSERT INTO item (id, tenant_id, code, name, base_uom_id, tax_group_id, created_at, updated_at, version) VALUES (?1, ?2, 'TST44', 'Test 44', '', ?3, 1, 1, 1)",
+                    rusqlite::params![tst44_item_id_c, tenant_c, tax_group_id_c],
+                )
+                .expect("item 44");
+                tx.execute(
+                    "INSERT INTO sku (id, tenant_id, item_id, code, name, base_uom_id, tax_group_id, created_at, updated_at, version) VALUES (?1, ?2, ?3, 'TST44', 'Test 44', '', ?4, 1, 1, 1)",
+                    rusqlite::params![tst44_sku_id_c, tenant_c, tst44_item_id_c, tax_group_id_c],
+                )
+                .expect("sku 44");
+                tx.execute(
+                    "INSERT INTO barcode (id, tenant_id, sku_id, code, is_primary, created_at, updated_at, version) VALUES (?1, ?2, ?3, '1234567890999', 1, 1, 1, 1)",
+                    rusqlite::params![uuid::Uuid::now_v7().to_string(), tenant_c, tst44_sku_id_c],
+                )
+                .expect("barcode 44");
+                tx.execute(
+                    "INSERT INTO price_list_entry (id, tenant_id, price_list_id, sku_id, price_e4, created_at, updated_at, version) VALUES (?1, ?2, ?3, ?4, 443400, 1, 1, 1)",
+                    rusqlite::params![uuid::Uuid::now_v7().to_string(), tenant_c, price_list_id_c, tst44_sku_id_c],
+                )
+                .expect("price entry 44");
                 tx.commit().expect("commit");
                 Ok(())
             })
             .expect("seed catalog");
-        (price_list_id, sku_id)
+        (price_list_id, sku_id, tst44_sku_id)
+    }
+
+    /// Seed a cashier + manager + open shift for the sale tests, and
+    /// return `(cashier_id, manager_id)`. The manager's PIN is real
+    /// (Argon2id, ~1.7 s in debug) because the above-threshold
+    /// discount test verifies it; the cashier row is inserted
+    /// directly with a dummy hash — no flow in these tests ever
+    /// verifies the cashier's PIN.
+    fn seed_test_users(db: &Db) -> (String, String) {
+        let cashier_role = create_role(
+            db,
+            "test-tenant",
+            "Cashier",
+            &["sale.create", "sale.discount.line"],
+            500,
+            1,
+        )
+        .expect("cashier role");
+        let manager_role = create_role(
+            db,
+            "test-tenant",
+            "Store Manager",
+            &[
+                "sale.create",
+                "sale.discount.line",
+                "sale.discount.bill",
+                "sale.price_override",
+                "sale.void_line",
+                "shift.close",
+                "cash.drawer_open",
+                "stock.adjust",
+                "user.manage",
+                "settings.edit",
+            ],
+            2000,
+            1,
+        )
+        .expect("manager role");
+        let manager = create_user(
+            db,
+            "test-tenant",
+            "manager",
+            "4321",
+            Some(&manager_role.id),
+            1,
+        )
+        .expect("manager");
+        let cashier_id = uuid::Uuid::now_v7().to_string();
+        let cashier_id_c = cashier_id.clone();
+        let role_id_c = cashier_role.id.clone();
+        db.write(move |conn| {
+            conn.execute(
+                "INSERT INTO user (id, tenant_id, username, pin_hash, role_id, failed_attempts, locked_until, created_at, updated_at, version) VALUES (?1, 'test-tenant', 'cashier', 'dummy-hash-never-verified', ?2, 0, NULL, 1, 1, 1)",
+                rusqlite::params![cashier_id_c, role_id_c],
+            )
+            .expect("cashier");
+            conn.execute(
+                "INSERT INTO shift (id, tenant_id, branch_id, terminal_id, status, opened_at, created_at, updated_at, version) VALUES ('shift-1', 'test-tenant', 'branch-1', 'terminal-1', 'open', 1, 1, 1, 1)",
+                [],
+            )
+            .expect("shift");
+            Ok(())
+        })
+        .expect("seed users");
+        (cashier_id, manager.id)
     }
 
     impl TestApp {
@@ -1026,7 +1445,7 @@ mod tests {
             let dir = TempDirGuard::new();
             let db = Db::open_in_memory().expect("in-memory db");
             let scratch = ScratchDb::open(dir.0.join("scratch.db")).expect("scratch db");
-            let (price_list_id, sku_id) = seed_test_catalog(&db);
+            let (price_list_id, sku_id, sku_tst44_id) = seed_test_catalog(&db);
             set_setting(
                 &db,
                 "test-tenant",
@@ -1074,12 +1493,36 @@ mod tests {
                 state: AppState::new(core, Some(session)),
                 _dir: dir,
                 sku_id,
+                sku_tst44_id,
             }
+        }
+
+        /// A test `AppState` with a real cashier + manager and an open
+        /// shift: the till a sale needs. The session's user is the
+        /// cashier (5% line-discount ceiling) and the shift is open.
+        fn with_sale_till() -> Self {
+            let mut app = Self::new();
+            let (cashier_id, _manager_id) = seed_test_users(app.state.core.db());
+            let session = app.state.session.clone().expect("session");
+            app.state.session = Some(Session {
+                user_id: Some(cashier_id),
+                shift_id: Some("shift-1".to_string()),
+                ..session
+            });
+            app
         }
 
         /// The current cart view through the command impl path.
         fn get_cart(&self) -> CartViewDto {
             self.state.current_cart_view().expect("get cart")
+        }
+
+        /// Add one unit of `sku_id` at `price_e4` to the current cart
+        /// and return the priced view.
+        fn add_line(&self, sku_id: &str, price_e4: i64) -> CartViewDto {
+            let cart = self.get_cart();
+            draft_add_line_impl(&self.state, &cart.draft_id, sku_id, 1_000, price_e4)
+                .expect("add line")
         }
     }
 
@@ -1263,5 +1706,237 @@ mod tests {
             matches!(write_result, Err(shopcore_db::DbError::ActorStopped)),
             "expected ActorStopped after shutdown, got {write_result:?}"
         );
+    }
+
+    // ---- spec 001c-2: discount + PIN, cash completion, reprint ----
+
+    /// A 5% discount is at the cashier's ceiling, so it applies
+    /// without a manager PIN: 100.00 − 5.00 = 95.00 net, tax 17.10,
+    /// total 112.10.
+    #[test]
+    fn discount_at_threshold_applies_without_pin() {
+        let app = TestApp::with_sale_till();
+        let view = app.add_line(&app.sku_id.clone(), 1_000_000);
+        let line_id = view.lines.first().expect("line").id.clone();
+        let view = draft_apply_discount_impl(
+            &app.state,
+            &view.draft_id,
+            &line_id,
+            "percent",
+            500,
+            None,
+            None,
+        )
+        .expect("discount");
+        assert_eq!(view.totals.subtotal_minor, 10_000);
+        assert_eq!(view.totals.discount_minor, 500);
+        assert_eq!(view.totals.net_subtotal_minor, 9_500);
+        assert_eq!(view.totals.tax_minor, 1_710);
+        assert_eq!(view.totals.total_minor, 11_210);
+    }
+
+    /// A 10% discount is above the cashier's 5% ceiling: without a
+    /// manager it fails with `DISCOUNT_NEEDS_APPROVAL` (and a wrong
+    /// PIN fails the same way); with the manager's PIN it applies.
+    #[test]
+    fn discount_above_threshold_needs_manager_pin() {
+        let app = TestApp::with_sale_till();
+        let view = app.add_line(&app.sku_id.clone(), 1_000_000);
+        let line_id = view.lines.first().expect("line").id.clone();
+        let draft_id = view.draft_id.clone();
+        let err = draft_apply_discount_impl(
+            &app.state, &draft_id, &line_id, "percent", 1_000, None, None,
+        )
+        .expect_err("discount without a manager must fail");
+        assert_eq!(err.code, "DISCOUNT_NEEDS_APPROVAL");
+        let err = draft_apply_discount_impl(
+            &app.state,
+            &draft_id,
+            &line_id,
+            "percent",
+            1_000,
+            Some("manager"),
+            Some("0000"),
+        )
+        .expect_err("discount with a wrong PIN must fail");
+        assert_eq!(err.code, "DISCOUNT_NEEDS_APPROVAL");
+        let view = draft_apply_discount_impl(
+            &app.state,
+            &draft_id,
+            &line_id,
+            "percent",
+            1_000,
+            Some("manager"),
+            Some("4321"),
+        )
+        .expect("discount with the manager PIN");
+        assert_eq!(view.totals.discount_minor, 1_000);
+        assert_eq!(view.totals.net_subtotal_minor, 9_000);
+        assert_eq!(view.totals.tax_minor, 1_620);
+        assert_eq!(view.totals.total_minor, 10_620);
+    }
+
+    /// Boundary validation: an unknown kind, a percent over 100%,
+    /// and a negative fixed discount are all rejected before the
+    /// use case runs; a manager username without a PIN is too.
+    #[test]
+    fn discount_boundary_validation_rejects_bad_inputs() {
+        let app = TestApp::with_sale_till();
+        let view = app.add_line(&app.sku_id.clone(), 1_000_000);
+        let line_id = view.lines.first().expect("line").id.clone();
+        let draft_id = view.draft_id.clone();
+        for (kind, value, code) in [
+            ("bogus", 500, "INVALID_INPUT"),
+            ("percent", 10_001, "DOMAIN_ERROR"),
+            ("fixed", -1, "INVALID_INPUT"),
+        ] {
+            let err =
+                draft_apply_discount_impl(&app.state, &draft_id, &line_id, kind, value, None, None)
+                    .expect_err("bad discount must fail");
+            assert_eq!(err.code, code, "kind={kind} value={value}");
+        }
+        let err = draft_apply_discount_impl(
+            &app.state,
+            &draft_id,
+            &line_id,
+            "percent",
+            1_000,
+            Some("manager"),
+            None,
+        )
+        .expect_err("half a manager pair must fail");
+        assert_eq!(err.code, "INVALID_INPUT");
+    }
+
+    /// The 001a cash acceptance through the command impls: total
+    /// 52.32, tender 60.00, change 7.68, receipt printed (printer
+    /// online), receipt number `MAIN-T1-<today>-<seq>`.
+    #[tokio::test]
+    async fn complete_sale_cash_52_32_tender_60_change_7_68() {
+        let app = TestApp::with_sale_till();
+        let view = app.add_line(&app.sku_tst44_id.clone(), 443_400);
+        let draft_id = view.draft_id.clone();
+        let completed = complete_sale_cash_impl(&app.state, &draft_id, 6_000)
+            .await
+            .expect("complete");
+        assert_eq!(completed.total_minor, 5_232);
+        assert_eq!(completed.change_minor, 768);
+        assert_eq!(completed.rounding_line_minor, 0);
+        assert!(!completed.receipt_queued, "the printer is online");
+        assert!(!completed.already_completed);
+        assert!(
+            completed.receipt_no.starts_with("MAIN-T1-"),
+            "receipt_no={}",
+            completed.receipt_no
+        );
+        let receipt = &completed.receipt;
+        assert_eq!(receipt.lines.len(), 1);
+        assert_eq!(receipt.subtotal_minor, 4_434);
+        assert_eq!(receipt.net_subtotal_minor, 4_434);
+        assert_eq!(receipt.discount_minor, 0);
+        assert_eq!(receipt.tax_minor, 798);
+        assert_eq!(receipt.total_minor, 5_232);
+        assert_eq!(receipt.tender_minor, 6_000);
+        assert_eq!(receipt.change_minor, 768);
+        // The cart is empty after completion (a fresh draft).
+        let cart = app.get_cart();
+        assert_eq!(cart.lines, []);
+        assert_eq!(cart.totals.total_minor, 0);
+    }
+
+    /// Printer offline: the sale still commits, the receipt stays
+    /// queued, and the next sale is not delayed (a fresh draft
+    /// opens immediately).
+    #[tokio::test]
+    async fn complete_with_printer_offline_queues_receipt() {
+        let app = TestApp::with_sale_till();
+        app.state
+            .printer
+            .try_lock()
+            .expect("printer lock")
+            .set_offline(true);
+        let view = app.add_line(&app.sku_tst44_id.clone(), 443_400);
+        let completed = complete_sale_cash_impl(&app.state, &view.draft_id, 6_000)
+            .await
+            .expect("complete");
+        assert_eq!(completed.total_minor, 5_232);
+        assert!(completed.receipt_queued, "the receipt must queue");
+        assert_eq!(app.get_cart().lines, [], "the next sale opens");
+    }
+
+    /// A replay returns the ORIGINAL sale unchanged (same sale id,
+    /// receipt number, and change from the ORIGINAL tender), with
+    /// `already_completed: true`.
+    #[tokio::test]
+    async fn complete_twice_returns_original_sale() {
+        let app = TestApp::with_sale_till();
+        let view = app.add_line(&app.sku_tst44_id.clone(), 443_400);
+        let draft_id = view.draft_id.clone();
+        let first = complete_sale_cash_impl(&app.state, &draft_id, 6_000)
+            .await
+            .expect("first complete");
+        let second = complete_sale_cash_impl(&app.state, &draft_id, 10_000)
+            .await
+            .expect("replay");
+        assert!(second.already_completed);
+        assert_eq!(second.sale_id, first.sale_id);
+        assert_eq!(second.receipt_no, first.receipt_no);
+        assert_eq!(second.total_minor, first.total_minor);
+        assert_eq!(
+            second.change_minor, 768,
+            "change is from the original tender"
+        );
+    }
+
+    /// No open shift: the completion fails with `SHIFT_NOT_OPEN`
+    /// before any sale is written.
+    #[tokio::test]
+    async fn complete_without_shift_fails() {
+        let app = TestApp::new();
+        let view = app.add_line(&app.sku_id.clone(), 1_000_000);
+        let err = complete_sale_cash_impl(&app.state, &view.draft_id, 12_000)
+            .await
+            .expect_err("complete without a shift must fail");
+        assert_eq!(err.code, "SHIFT_NOT_OPEN");
+    }
+
+    /// Reprint after completion prints the receipt and writes a
+    /// `receipt.reprint` audit row.
+    #[tokio::test]
+    async fn reprint_after_completion_is_logged() {
+        let app = TestApp::with_sale_till();
+        let view = app.add_line(&app.sku_tst44_id.clone(), 443_400);
+        let completed = complete_sale_cash_impl(&app.state, &view.draft_id, 6_000)
+            .await
+            .expect("complete");
+        let reprint = reprint_receipt_impl(&app.state, &completed.sale_id)
+            .await
+            .expect("reprint");
+        assert!(reprint.printed);
+        assert_eq!(reprint.sale_id, completed.sale_id);
+        let printed = app
+            .state
+            .printer
+            .try_lock()
+            .expect("printer lock")
+            .printed_docs()
+            .len();
+        assert_eq!(printed, 2, "one print at completion + one reprint");
+        let reprints: i64 = app
+            .state
+            .core
+            .db()
+            .read(|conn| {
+                let count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM audit_log WHERE action = 'receipt.reprint'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(shopcore_db::DbError::from)?;
+                Ok(count)
+            })
+            .expect("audit count");
+        assert_eq!(reprints, 1);
     }
 }

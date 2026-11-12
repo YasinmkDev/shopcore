@@ -66,6 +66,9 @@ function makeClient(overrides: Partial<Pick<CoreClient, "getSession" | "getStatu
     draftRemoveLine: () => never(),
     draftCancel: () => never(),
     draftRestoreLine: () => never(),
+    draftApplyDiscount: () => never(),
+    completeSaleCash: () => never(),
+    reprintReceipt: () => never(),
     subscribe: () => () => {
       /* no events in these tests */
     },
