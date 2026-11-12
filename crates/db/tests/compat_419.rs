@@ -25,8 +25,7 @@ fn old_db_opens_with_same_key() {
         std::path::Path::new(&fixture).exists(),
         "compat fixture missing: {fixture}"
     );
-    let dir =
-        std::env::temp_dir().join(format!("shopcore-db-compat-419-{}", uuid::Uuid::now_v7()));
+    let dir = std::env::temp_dir().join(format!("shopcore-db-compat-419-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("sqlcipher-419-compat.db");
     std::fs::copy(&fixture, &path).unwrap();
