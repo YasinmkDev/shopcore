@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 # rusqlite is already a workspace dependency (spec 000, ADR-013 pins ts-rs;
-# rusqlite 0.41.1 bundled-sqlcipher-vendored-openssl). The bench DB must use
+# rusqlite 0.42.0 bundled-sqlcipher-vendored-openssl). The bench DB must use
 # the same SQLCipher engine as the real app, or timings are meaningless.
 rusqlite.workspace = true
 serde.workspace = true
