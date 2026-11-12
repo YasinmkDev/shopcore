@@ -182,7 +182,7 @@ pub fn seed_dev_till(db: &Db, tenant_id: &str, now_ms: i64) -> Result<SeedReport
     })?;
 
     // Sample catalog: (code, name, barcode, price_e4, tax_group, uom, stock qty_milli).
-    let catalog: [(&str, &str, &str, i64, &str, &str, i64); 6] = [
+    let catalog: [(&str, &str, &str, i64, &str, &str, i64); 7] = [
         (
             "MILK1L",
             "Milk 1L",
@@ -236,6 +236,19 @@ pub fn seed_dev_till(db: &Db, tenant_id: &str, now_ms: i64) -> Result<SeedReport
             "ZERO",
             "EA",
             60_000,
+        ),
+        // TST44 — the 001a cash acceptance item (44.34 + 18% = 52.32):
+        // the Playwright e2e flow (spec 001c-2) scans it and asserts
+        // the 52.32 / 60.00 / 7.68 change. It is a dev-sample row, not
+        // a grocery — its code says so.
+        (
+            "TST44",
+            "TST44",
+            "1234567890999",
+            443_400,
+            "STD",
+            "EA",
+            10_000,
         ),
     ];
     let mut sku_count = 0;

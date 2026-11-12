@@ -17,7 +17,7 @@ fn seed_produces_a_usable_till() {
     assert_eq!(DEV_SEED_MARKER, "SHOPCORE_DEV_SEED_MARKER_V1");
     let db = fresh_db();
     let report = seed_dev_till(&db, TENANT, NOW).unwrap();
-    assert_eq!(report.sku_count, 6);
+    assert_eq!(report.sku_count, 7);
     // The seeded users can sign in with the documented dev PINs.
     assert_eq!(
         verify_pin(&db, TENANT, "cashier", "1234", NOW)
@@ -68,7 +68,7 @@ fn sample_barcodes_lists_the_seeded_catalog() {
     let db = fresh_db();
     seed_dev_till(&db, TENANT, NOW).unwrap();
     let rows = sample_barcodes(&db, TENANT).unwrap();
-    assert_eq!(rows.len(), 6);
+    assert_eq!(rows.len(), 7);
     let by_barcode = |barcode: &str| {
         rows.iter()
             .find(|row| row.barcode == barcode)
@@ -96,6 +96,13 @@ fn sample_barcodes_lists_the_seeded_catalog() {
     let eggs = by_barcode("1234567890128");
     assert_eq!(eggs.price_minor, 36_000);
     assert_eq!(eggs.tax_mode, "zero");
+    // TST44 — the 001a cash acceptance item (44.34 + 18% = 52.32),
+    // there so the Playwright e2e flow can scan it.
+    let tst44 = by_barcode("1234567890999");
+    assert_eq!(tst44.name, "TST44");
+    assert_eq!(tst44.price_minor, 4_434);
+    assert_eq!(tst44.tax_mode, "exclusive");
+    assert_eq!(tst44.rate_bp, 1800);
 }
 
 #[test]

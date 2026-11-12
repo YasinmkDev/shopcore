@@ -707,7 +707,7 @@ export function SellScreen({ client }: { client: CoreClient }): ReactElement {
       <div className="mt-4 flex min-h-0 flex-1 border-t border-border">
         {completed !== null ? (
           <div className="flex min-h-0 flex-1 flex-col items-center gap-3 overflow-y-auto p-4">
-            <p className="text-lg font-semibold">{t("sell.complete.title")}</p>
+            <h2 className="text-lg font-semibold">{t("sell.complete.title")}</h2>
             <ReceiptPreview
               receipt={completed.receipt}
               currencyExponent={cart.currency_exponent}

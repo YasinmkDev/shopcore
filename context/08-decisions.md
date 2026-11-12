@@ -397,6 +397,9 @@ branch run can be dispatched manually (`gh workflow run ci.yml
 The check job also runs the desktop tests with `dev-session` on,
 covering the feature-gated command impl and the `dev_build` flag.
 
+## Check job stays as-is (owner decision 2026-11-12)
+The 33m21s check run (main run 43208801477) was a one-off cold cache after the SQLCipher bump (ADR-037): vendored OpenSSL + SQLCipher C builds ran 3x, ~28 min of the 33 min. The warm-cache check is 6m36s (branch run 43235996397). The earlier proposal — cargo check first + clippy --no-deps + one nextest invocation including dev-seed — is NOT implemented. Reason: folding the dev-seed tests into the main nextest run would stop testing the shipped configuration; the dev-seed tests must keep running against default features. Recorded in the tracker under "CI speed, revisit if cold runs become frequent": if cold runs become frequent, keep two test invocations (default features and dev features) and share compiled output via a cache.
+
 ## Spec 001c-1 judgment calls (2026-11-12, implementation)
 
 The spec lists 7 commands; three more were needed for the initial
@@ -458,6 +461,40 @@ Other calls made during implementation:
 - `just dev` runs `tauri dev --features dev-session`; CI has a
   check-job step compiling the desktop with that feature, so
   feature-gated code is compiled in CI, not only on a dev machine.
+
+## Spec 001c-2 judgment calls (2026-11-12, implementation)
+
+- The shim does NOT emit `sale.completed`: the Tauri `complete_sale_cash`
+  wrapper emits it; the shim's `dispatch` returns the completion DTO
+  and the e2e flow drives state from command returns. There is no push
+  channel over HTTP in 001c-2, so `HttpClient.subscribe()` is a
+  documented no-op (Phase 5 adds events with the hub transport).
+- The bench commands (`bench_startup_ms`, `bench_ui_results`) are NOT
+  exposed through the shim: they are debug-only (one writes a file
+  into the OS temp dir) and the e2e flow never needs them.
+- The per-run token comes from `SHOPCORE_E2E_TOKEN` when the harness
+  sets it, else it is generated (nanosecond time + pid + counter,
+  hex). Its job is to prove the caller is the harness that spawned
+  this process, not to be a cryptographic secret.
+- The shim marker `SHOPCORE_E2E_SHIM_V1` is printed at shim startup
+  so the literal survives in the e2e binary's rodata, where the CI
+  release-absence grep can find it (and prove it absent from
+  release).
+- No list-managers command exists, so the manager is typed in the
+  PIN popover (dev seed: `manager` / 4321). A manager picker is a
+  later spec's job.
+- Tender stays a string until completion; only `parseMoneyToMinor`
+  (integer string math) turns it into minor units. No live rounding
+  preview: the UI does not know the tenant's granularity; a rounding
+  line shows on the receipt when rounding is on.
+- `cargo deny` has no `--all-features` flag in 0.20.2, so the two
+  feature sets are proven this way: the default `cargo deny check`
+  resolves the full lockfile graph (it already lists `axum` 0.8.9
+  and `crc32fast` 1.5.4 — the single crate the e2e-shim tree adds
+  over the default-feature workspace tree, via `flate2`/`png`);
+  `cargo tree -p shopcore-desktop` shows 0 occurrences of `axum`
+  (release graph clean) while `--features e2e-shim` shows `axum`
+  v0.8.9 pulled only by `shopcore-desktop`.
 
 ## ADR-009 assessment (spec 005, 2026-11-10) — KEEP
 The spike's 12 chaos tests all pass against a real Postgres (local) — duplicate delivery, out-of-order batches, connection drop, server restart, clock skew, two tills selling the last unit, upgrade with unsent outbox, snapshot interrupt/resume, full-history replay (byte-identical, unique constraint proven to fire), per-field LWW merge, gap detector, revalidation stub. No chaos test exposed a protocol design flaw, so the stop condition did not trigger. ADR-009 (custom outbox/inbox sync, not generic CRDT) is KEPT for Phase 5. Two notes for Phase 5: (1) the per-tenant sequence lock serializes batches per tenant — under high concurrency this is a throughput ceiling to measure; (2) the snapshot catalog is the set of SKUs the server has seen (via movements/price entries), not the full 500k-SKU catalog — the full-catalog snapshot is the manual target-PC run.
