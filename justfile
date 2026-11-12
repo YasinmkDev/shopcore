@@ -105,3 +105,15 @@ bench-verify:
 # CI uploads it as the `shopcore-bench-windows` artifact with RUN.md.
 bench-exe:
     cargo build --release -p shopcore-bench
+
+# Remove all test scratch dirs under target/ (sale/crash/scratch test
+# fixtures). The test binaries clean up after themselves (per-test Drop
+# + 1-hour stale-cleanup), but a killed run can leave dirs behind.
+# Linux dev machine only (CI does not need it).
+clean-test-tmp:
+    rm -rf target/test-tmp-001b2 target/test-tmp-scratch
+
+# Check the toolchain + system libraries `just check` needs and print
+# what is missing. Read-only; changes nothing. Linux dev machine only.
+doctor:
+    bash scripts/doctor.sh

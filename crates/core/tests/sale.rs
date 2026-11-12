@@ -18,6 +18,9 @@
     clippy::indexing_slicing
 )]
 
+mod common;
+
+use common::{test_root_001b2, unique_test_dir};
 use shopcore_core::audit::verify_audit_chain;
 use shopcore_core::draft::{
     draft_add_line, draft_apply_discount, draft_cancel, draft_remove_line, draft_restore_line,
@@ -41,7 +44,6 @@ use shopcore_domain::LineDiscount;
 use shopcore_hardware::{BarcodeScanner, MockDrawer, MockPrinter, MockScanner, ScanEvent};
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The fake clock: every timestamp in the fixture is this epoch-ms.
 /// (The `date_yyyymmdd` the sale takes is a separate input.)
@@ -188,23 +190,16 @@ struct TemplateInfo {
 }
 
 static TEMPLATE: OnceLock<TemplateInfo> = OnceLock::new();
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// A unique scratch directory under the workspace `target/` (real disk,
-/// not `/tmp` tmpfs — the crash tests need real `fsync` behaviour).
-fn test_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-tmp-001b2")
-}
-
-fn unique_dir(label: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    test_root().join(format!("{label}-{}-{n}", std::process::id()))
-}
 
 fn template() -> &'static TemplateInfo {
     TEMPLATE.get_or_init(|| {
-        let dir = unique_dir("template");
-        std::fs::create_dir_all(&dir).unwrap();
+        // Built once per test binary (OnceLock) and NEVER written to after
+        // building: the DB is dropped after checkpointing, and every test
+        // copies the file into its own fresh dir. The dir is removed by
+        // the 1-hour stale-cleanup on a later run (a process-exit hook
+        // would need `unsafe`, which the workspace forbids — ADR-035);
+        // `just clean-test-tmp` removes it on demand.
+        let dir = unique_test_dir(&test_root_001b2(), "template");
         let db_path = dir.join("till.db");
         let db = Db::open(&db_path, Some(TEST_KEY)).unwrap();
         let (cashier, viewer) = seed_template_users(&db);
@@ -468,8 +463,7 @@ struct Fixture {
 impl Fixture {
     fn new(label: &str) -> Self {
         let info = template();
-        let dir = unique_dir(label);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = unique_test_dir(&test_root_001b2(), label);
         std::fs::copy(info.dir.join("till.db"), dir.join("till.db")).unwrap();
         let db = Db::open(dir.join("till.db"), Some(TEST_KEY)).unwrap();
         let scratch = ScratchDb::open(dir.join("scratch.db")).unwrap();
@@ -1326,8 +1320,7 @@ fn replay_with_a_different_tender_returns_the_original_sale() {
 #[test]
 fn draft_persists_and_restores_after_restart() {
     let info = template();
-    let dir = unique_dir("draft-restart");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = unique_test_dir(&test_root_001b2(), "draft-restart");
     std::fs::copy(info.dir.join("till.db"), dir.join("till.db")).unwrap();
     let main_path = dir.join("till.db");
     let scratch_path = dir.join("scratch.db");

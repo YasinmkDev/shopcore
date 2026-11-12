@@ -9,21 +9,27 @@
 //! under load).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
+use common::{test_root_scratch, unique_test_dir};
 use shopcore_core::draft::{draft_add_line, load_draft, open_draft};
 use shopcore_core::scratch::ScratchDb;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// A unique scratch directory under the workspace `target/` (real disk,
 /// not `/tmp` tmpfs — the checkpoint timing must see real `fsync`
-/// behaviour).
-fn unique_dir(label: &str) -> PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/test-tmp-scratch")
-        .join(format!("{label}-{}-{n}", std::process::id()))
+/// behaviour). See `common::unique_test_dir` (PID + `UUIDv7`, `create_dir`).
+///
+/// Removes the dir when dropped (best effort), so a failed test does
+/// not leave a stale dir behind.
+struct DirGuard(PathBuf);
+
+impl Drop for DirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Poll until the scratch DB has completed at least `want`
@@ -42,8 +48,8 @@ fn wait_for_checkpoints(scratch: &ScratchDb, want: u64, timeout: Duration) {
 
 #[test]
 fn checkpoint_timer_fires_after_a_draft_change() {
-    let dir = unique_dir("timer-fires");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = unique_test_dir(&test_root_scratch(), "timer-fires");
+    let _guard = DirGuard(dir.clone());
     let scratch_path = dir.join("scratch.db");
     // Short interval for the test (the production default is 1 s).
     let scratch =
@@ -63,8 +69,8 @@ fn checkpoint_timer_fires_after_a_draft_change() {
 
 #[test]
 fn checkpoint_timer_bound_under_load() {
-    let dir = unique_dir("timer-bound");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = unique_test_dir(&test_root_scratch(), "timer-bound");
+    let _guard = DirGuard(dir.clone());
     // The production default interval (1 s).
     let scratch = ScratchDb::open(dir.join("scratch.db")).unwrap();
     let cart = open_draft(&scratch, "tenant", "branch", "terminal", None, None, 0).unwrap();

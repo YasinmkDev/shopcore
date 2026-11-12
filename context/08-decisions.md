@@ -210,7 +210,35 @@ flushes the file on process death) — the crash tests prove ATOMICITY
 and RECOVERY only; the power-cut loss itself is proven by the manual
 power-pull test, a pre-pilot checklist item (owner: user).
 
-## ADR note — Audit verification must become INCREMENTAL (future spec, NOT built)
+## ADR-035 — Test template-dir cleanup: stale-cleanup only, no `atexit`. Accepted 2026-11-12 (owner fix for the template-dir collision)
+
+The sale-test template DB is built once per test binary (`OnceLock`)
+and copied per test. Its dir was named `{label}-{pid}-{n}` under a
+never-cleaned `target/test-tmp-*/` root; PID reuse across runs let a
+new test process reopen a leftover template DB, and the role seeding
+failed with `UNIQUE constraint failed: role.tenant_id, role.name`
+(2026-11-11, `just check` run 2 of the 5x loop). The fix, in
+`crates/core/tests/common/mod.rs` (`unique_test_dir`, shared by the
+sale/crash/scratch test binaries): the dir name is
+`{label}-{pid}-{uuidv7}` (PID + a random UUIDv7 — unique per process
+AND per dir), created with `create_dir` (never `create_dir_all`) so a
+collision fails loudly instead of silently reusing a stale dir, and
+stale subdirs older than 1 hour are removed at startup (a
+concurrently-running test process only has fresh dirs, so it is never
+touched). Per-test dirs are removed by `Drop` (sale `Fixture`,
+scratch `DirGuard`) or an explicit removal (crash tests).
+
+A process-exit hook (`atexit`) for the template dir was CONSIDERED
+and REJECTED: it needs `unsafe`, and the workspace forbids `unsafe`
+code (`unsafe_code = "forbid"`, root `Cargo.toml`). Relaxing that
+lint for a test fixture was not done. The template dir is therefore
+removed by the 1-hour stale-cleanup on a later run, which bounds the
+accumulation to ~1 hour of runs (not the 346 dirs that accumulated
+before the fix); `just clean-test-tmp` removes everything on demand.
+If the owner later wants the literal process-exit deletion, the
+change is: workspace lint `forbid` -> `deny` + a scoped
+`#[allow(unsafe_code)]` on the test helper + an ADR for the `unsafe`
+— not a silent relaxation.
 `verify_audit_chain` today re-reads and re-hashes the whole chain
 from genesis on every run. That is fine for one terminal's short
 history, but it does not scale: a future spec must make verification
