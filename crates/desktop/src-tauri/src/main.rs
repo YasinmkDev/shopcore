@@ -123,7 +123,7 @@ impl From<shopcore_core::search::SearchError> for AppError {
 /// (amendment 3). Applies to every integer the UI sends (`qty_milli`,
 /// `unit_price_e4`) and every integer the core returns in a cart view.
 fn check_safe_integer(value: i64) -> Result<(), AppError> {
-    if value > MAX_SAFE_INTEGER || value < -MAX_SAFE_INTEGER {
+    if !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&value) {
         return Err(AppError::new(
             "INVALID_INTEGER",
             format!("integer {value} exceeds the JSON safe-integer limit (2^53-1)"),
@@ -399,8 +399,8 @@ fn bench_ui_results(payload: String) -> Result<String, String> {
 
 /// The session the sell screen works as (`None` until sign-in lands in
 /// 001d, except in dev where the auto-session fills it).
-fn get_session_impl(state: &AppState) -> Result<Option<SessionDto>, AppError> {
-    Ok(state.session().map(SessionDto::from))
+fn get_session_impl(state: &AppState) -> Option<SessionDto> {
+    state.session().map(SessionDto::from)
 }
 
 /// The till status the status bar renders: whether a shift is open
@@ -439,7 +439,7 @@ fn get_cart_impl(state: &AppState) -> Result<CartViewDto, AppError> {
 
 /// Search SKUs by name/code/barcode. Returns at most 20 hits for the
 /// sell screen's simple list (the core caps at 50).
-fn search_skus_impl(state: &AppState, query: String) -> Result<Vec<SkuHitDto>, AppError> {
+fn search_skus_impl(state: &AppState, query: &str) -> Result<Vec<SkuHitDto>, AppError> {
     let session = state.require_session()?;
     let mut index = state
         .search_index
@@ -448,7 +448,7 @@ fn search_skus_impl(state: &AppState, query: String) -> Result<Vec<SkuHitDto>, A
     let hits = core_search_skus(
         state.core.db(),
         &session.tenant_id,
-        &query,
+        query,
         &mut index,
         now_ms(),
     )?;
@@ -469,9 +469,9 @@ fn search_skus_impl(state: &AppState, query: String) -> Result<Vec<SkuHitDto>, A
 /// Look a barcode up: the `SKU` + its active price, or
 /// `BARCODE_NOT_FOUND` (the UI shows an inline message with the
 /// scanned code and keeps the cart).
-fn lookup_barcode_impl(state: &AppState, code: String) -> Result<SkuHitDto, AppError> {
+fn lookup_barcode_impl(state: &AppState, code: &str) -> Result<SkuHitDto, AppError> {
     let session = state.require_session()?;
-    let hit = core_lookup_barcode(state.core.db(), &session.tenant_id, &code, now_ms())?;
+    let hit = core_lookup_barcode(state.core.db(), &session.tenant_id, code, now_ms())?;
     Ok(SkuHitDto {
         sku_id: hit.sku_id,
         item_id: hit.item_id,
@@ -486,8 +486,8 @@ fn lookup_barcode_impl(state: &AppState, code: String) -> Result<SkuHitDto, AppE
 /// price opens a separate line) and return the priced cart.
 fn draft_add_line_impl(
     state: &AppState,
-    draft_id: String,
-    sku_id: String,
+    draft_id: &str,
+    sku_id: &str,
     qty_milli: i64,
     unit_price_e4: i64,
 ) -> Result<CartViewDto, AppError> {
@@ -495,52 +495,46 @@ fn draft_add_line_impl(
     check_safe_integer(unit_price_e4)?;
     core_draft_add_line(
         state.core.scratch(),
-        &draft_id,
-        &sku_id,
+        draft_id,
+        sku_id,
         qty_milli,
         unit_price_e4,
         now_ms(),
     )?;
-    state.cart_view(&draft_id)
+    state.cart_view(draft_id)
 }
 
 /// Set a line's quantity (0 removes the line, stashing it for undo)
 /// and return the priced cart.
 fn draft_set_qty_impl(
     state: &AppState,
-    draft_id: String,
-    line_id: String,
+    draft_id: &str,
+    line_id: &str,
     qty_milli: i64,
 ) -> Result<CartViewDto, AppError> {
     check_safe_integer(qty_milli)?;
-    core_draft_set_qty(
-        state.core.scratch(),
-        &draft_id,
-        &line_id,
-        qty_milli,
-        now_ms(),
-    )?;
-    state.cart_view(&draft_id)
+    core_draft_set_qty(state.core.scratch(), draft_id, line_id, qty_milli, now_ms())?;
+    state.cart_view(draft_id)
 }
 
 /// Remove a line (stashing it for undo) and return the priced cart.
 fn draft_remove_line_impl(
     state: &AppState,
-    draft_id: String,
-    line_id: String,
+    draft_id: &str,
+    line_id: &str,
 ) -> Result<CartViewDto, AppError> {
-    core_draft_remove_line(state.core.scratch(), &draft_id, &line_id, now_ms())?;
-    state.cart_view(&draft_id)
+    core_draft_remove_line(state.core.scratch(), draft_id, line_id, now_ms())?;
+    state.cart_view(draft_id)
 }
 
 /// Cancel the sale (with a confirm step in the UI; writes an audit row
 /// when the cart had lines) and return a fresh empty cart.
-fn draft_cancel_impl(state: &AppState, draft_id: String) -> Result<CartViewDto, AppError> {
+fn draft_cancel_impl(state: &AppState, draft_id: &str) -> Result<CartViewDto, AppError> {
     let session = state.require_session()?;
     core_draft_cancel(
         state.core.db(),
         state.core.scratch(),
-        &draft_id,
+        draft_id,
         session.user_id.as_deref().unwrap_or(""),
         now_ms(),
     )?;
@@ -549,20 +543,22 @@ fn draft_cancel_impl(state: &AppState, draft_id: String) -> Result<CartViewDto, 
 
 /// Restore the most recently removed line (single-level undo) and
 /// return the priced cart.
-fn draft_restore_line_impl(state: &AppState, draft_id: String) -> Result<CartViewDto, AppError> {
-    core_draft_restore_line(state.core.scratch(), &draft_id, now_ms())?;
-    state.cart_view(&draft_id)
+fn draft_restore_line_impl(state: &AppState, draft_id: &str) -> Result<CartViewDto, AppError> {
+    core_draft_restore_line(state.core.scratch(), draft_id, now_ms())?;
+    state.cart_view(draft_id)
 }
 
 /// The session the sell screen works as (`None` until sign-in lands in
 /// 001d, except in dev where the auto-session fills it).
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value, clippy::unnecessary_wraps)]
 fn get_session(state: State<'_, AppState>) -> Result<Option<SessionDto>, AppError> {
-    get_session_impl(&state)
+    Ok(get_session_impl(&state))
 }
 
 /// The till status the status bar renders.
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
 fn get_status(state: State<'_, AppState>) -> Result<StatusDto, AppError> {
     get_status_impl(&state)
 }
@@ -570,24 +566,28 @@ fn get_status(state: State<'_, AppState>) -> Result<StatusDto, AppError> {
 /// The current cart: the terminal's open draft (restored after a
 /// crash/restart, created when none exists) with priced lines + totals.
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
 fn get_cart(state: State<'_, AppState>) -> Result<CartViewDto, AppError> {
     get_cart_impl(&state)
 }
 
 /// Search SKUs by name/code/barcode.
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
 fn search_skus(state: State<'_, AppState>, query: String) -> Result<Vec<SkuHitDto>, AppError> {
-    search_skus_impl(&state, query)
+    search_skus_impl(&state, &query)
 }
 
 /// Look a barcode up.
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
 fn lookup_barcode(state: State<'_, AppState>, code: String) -> Result<SkuHitDto, AppError> {
-    lookup_barcode_impl(&state, code)
+    lookup_barcode_impl(&state, &code)
 }
 
 /// Add a line to the draft and return the priced cart.
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
 fn draft_add_line(
     state: State<'_, AppState>,
     draft_id: String,
@@ -595,43 +595,47 @@ fn draft_add_line(
     qty_milli: i64,
     unit_price_e4: i64,
 ) -> Result<CartViewDto, AppError> {
-    draft_add_line_impl(&state, draft_id, sku_id, qty_milli, unit_price_e4)
+    draft_add_line_impl(&state, &draft_id, &sku_id, qty_milli, unit_price_e4)
 }
 
 /// Set a line's quantity and return the priced cart.
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
 fn draft_set_qty(
     state: State<'_, AppState>,
     draft_id: String,
     line_id: String,
     qty_milli: i64,
 ) -> Result<CartViewDto, AppError> {
-    draft_set_qty_impl(&state, draft_id, line_id, qty_milli)
+    draft_set_qty_impl(&state, &draft_id, &line_id, qty_milli)
 }
 
 /// Remove a line and return the priced cart.
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
 fn draft_remove_line(
     state: State<'_, AppState>,
     draft_id: String,
     line_id: String,
 ) -> Result<CartViewDto, AppError> {
-    draft_remove_line_impl(&state, draft_id, line_id)
+    draft_remove_line_impl(&state, &draft_id, &line_id)
 }
 
 /// Cancel the sale and return a fresh empty cart.
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
 fn draft_cancel(state: State<'_, AppState>, draft_id: String) -> Result<CartViewDto, AppError> {
-    draft_cancel_impl(&state, draft_id)
+    draft_cancel_impl(&state, &draft_id)
 }
 
 /// Restore the most recently removed line and return the priced cart.
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
 fn draft_restore_line(
     state: State<'_, AppState>,
     draft_id: String,
 ) -> Result<CartViewDto, AppError> {
-    draft_restore_line_impl(&state, draft_id)
+    draft_restore_line_impl(&state, &draft_id)
 }
 
 /// Open the databases and build the managed state: the `DB` + scratch
@@ -657,10 +661,10 @@ fn build_app_state(app: &AppHandle) -> Result<AppState, Box<dyn std::error::Erro
 /// Shut the managed core down (amendment 8): the exit path. Best
 /// effort — a stuck thread is logged, never panicked over, at exit.
 fn shutdown_on_exit(app: &AppHandle) {
-    if let Some(state) = app.try_state::<AppState>() {
-        if let Err(err) = state.shutdown() {
-            eprintln!("ShopCore shutdown failed: {err}");
-        }
+    if let Some(state) = app.try_state::<AppState>()
+        && let Err(err) = state.shutdown()
+    {
+        eprintln!("ShopCore shutdown failed: {err}");
     }
 }
 
@@ -740,7 +744,13 @@ mod tests {
             if line.trim() == "#[tauri::command]" {
                 for next in lines.by_ref() {
                     let next = next.trim();
-                    if next.is_empty() || next.starts_with("///") || next.starts_with("//") {
+                    // Skip doc comments, blank lines, and attributes
+                    // (e.g. the clippy allow on command fns, 001c-1).
+                    if next.is_empty()
+                        || next.starts_with("///")
+                        || next.starts_with("//")
+                        || next.starts_with("#[")
+                    {
                         continue;
                     }
                     if let Some(rest) = next.strip_prefix("fn ") {
@@ -902,22 +912,20 @@ mod tests {
         sku_id: String,
     }
 
-    impl TestApp {
-        fn new() -> Self {
-            let dir = TempDirGuard::new();
-            let db = Db::open_in_memory().expect("in-memory db");
-            let scratch = ScratchDb::open(dir.0.join("scratch.db")).expect("scratch db");
-            let tenant = "test-tenant".to_string();
-            let tenant_c = tenant.clone();
-            let price_list_id = uuid::Uuid::now_v7().to_string();
-            let price_list_id_c = price_list_id.clone();
-            let tax_group_id = uuid::Uuid::now_v7().to_string();
-            let tax_group_id_c = tax_group_id.clone();
-            let sku_id = uuid::Uuid::now_v7().to_string();
-            let sku_id_c = sku_id.clone();
-            let item_id = uuid::Uuid::now_v7().to_string();
-            let item_id_c = item_id.clone();
-            db.write(move |conn| {
+    /// Seed a minimal catalog (one 18%-exclusive group, one SKU with
+    /// a barcode + price) and return `(price_list_id, sku_id)`.
+    fn seed_test_catalog(db: &Db) -> (String, String) {
+        let tenant = "test-tenant".to_string();
+        let tenant_c = tenant.clone();
+        let price_list_id = uuid::Uuid::now_v7().to_string();
+        let price_list_id_c = price_list_id.clone();
+        let tax_group_id = uuid::Uuid::now_v7().to_string();
+        let tax_group_id_c = tax_group_id.clone();
+        let sku_id = uuid::Uuid::now_v7().to_string();
+        let sku_id_c = sku_id.clone();
+        let item_id = uuid::Uuid::now_v7().to_string();
+        let item_id_c = item_id.clone();
+        db.write(move |conn| {
                 let tx = conn.transaction().expect("tx");
                 tx.execute(
                     "INSERT INTO branch (id, tenant_id, code, name, created_at, updated_at, version) VALUES (?1, ?2, 'MAIN', 'Main Branch', 1, 1, 1)",
@@ -963,6 +971,15 @@ mod tests {
                 Ok(())
             })
             .expect("seed catalog");
+        (price_list_id, sku_id)
+    }
+
+    impl TestApp {
+        fn new() -> Self {
+            let dir = TempDirGuard::new();
+            let db = Db::open_in_memory().expect("in-memory db");
+            let scratch = ScratchDb::open(dir.0.join("scratch.db")).expect("scratch db");
+            let (price_list_id, sku_id) = seed_test_catalog(&db);
             set_setting(
                 &db,
                 "test-tenant",
@@ -1024,28 +1041,30 @@ mod tests {
     #[test]
     fn scan_flow_lookup_add_prices_the_cart() {
         let app = TestApp::new();
-        let hit = lookup_barcode_impl(&app.state, "1234567890100".to_string()).expect("lookup");
+        let hit = lookup_barcode_impl(&app.state, "1234567890100").expect("lookup");
         assert_eq!(hit.name, "Test 100");
         assert_eq!(hit.price_e4, Some(1_000_000));
         let cart = app.get_cart();
         let view = draft_add_line_impl(
             &app.state,
-            cart.draft_id.clone(),
-            hit.sku_id.clone(),
+            &cart.draft_id,
+            &hit.sku_id,
             1_000,
             hit.price_e4.expect("price"),
         )
         .expect("add line");
         assert_eq!(view.lines.len(), 1);
-        assert_eq!(view.lines[0].name, "Test 100");
+        let line = view.lines.first().expect("line");
+        assert_eq!(line.name, "Test 100");
         assert_eq!(view.totals.subtotal_minor, 10_000);
         assert_eq!(view.totals.tax_minor, 1_800);
         assert_eq!(view.totals.total_minor, 11_800);
         // A second scan of the same SKU merges into qty 2.
-        let view = draft_add_line_impl(&app.state, cart.draft_id, hit.sku_id, 1_000, 1_000_000)
+        let view = draft_add_line_impl(&app.state, &cart.draft_id, &hit.sku_id, 1_000, 1_000_000)
             .expect("add again");
         assert_eq!(view.lines.len(), 1);
-        assert_eq!(view.lines[0].qty_milli, 2_000);
+        let line = view.lines.first().expect("line");
+        assert_eq!(line.qty_milli, 2_000);
         assert_eq!(view.totals.total_minor, 23_600);
     }
 
@@ -1054,7 +1073,7 @@ mod tests {
     #[test]
     fn unknown_barcode_returns_barcode_not_found() {
         let app = TestApp::new();
-        let err = lookup_barcode_impl(&app.state, "1234567890123".to_string()).unwrap_err();
+        let err = lookup_barcode_impl(&app.state, "1234567890123").unwrap_err();
         assert_eq!(err.code, "BARCODE_NOT_FOUND");
         assert!(err.message.contains("1234567890123"));
     }
@@ -1067,8 +1086,8 @@ mod tests {
         let cart = app.get_cart();
         let err = draft_add_line_impl(
             &app.state,
-            cart.draft_id,
-            app.sku_id.clone(),
+            &cart.draft_id,
+            &app.sku_id,
             MAX_SAFE_INTEGER + 1,
             1_000_000,
         )
@@ -1081,20 +1100,13 @@ mod tests {
     fn remove_and_restore_line_round_trips() {
         let app = TestApp::new();
         let cart = app.get_cart();
-        let view = draft_add_line_impl(
-            &app.state,
-            cart.draft_id.clone(),
-            app.sku_id.clone(),
-            1_000,
-            1_000_000,
-        )
-        .expect("add");
+        let view = draft_add_line_impl(&app.state, &cart.draft_id, &app.sku_id, 1_000, 1_000_000)
+            .expect("add");
         assert_eq!(view.lines.len(), 1);
-        let line_id = view.lines[0].id.clone();
-        let view =
-            draft_remove_line_impl(&app.state, cart.draft_id.clone(), line_id).expect("remove");
-        assert!(view.lines.is_empty());
-        let view = draft_restore_line_impl(&app.state, cart.draft_id).expect("restore");
+        let line_id = view.lines.first().expect("line").id.clone();
+        let view = draft_remove_line_impl(&app.state, &cart.draft_id, &line_id).expect("remove");
+        assert_eq!(view.lines, []);
+        let view = draft_restore_line_impl(&app.state, &cart.draft_id).expect("restore");
         assert_eq!(view.lines.len(), 1);
         assert_eq!(view.totals.total_minor, 11_800);
     }
@@ -1104,16 +1116,10 @@ mod tests {
     fn cancel_returns_a_fresh_empty_cart() {
         let app = TestApp::new();
         let cart = app.get_cart();
-        draft_add_line_impl(
-            &app.state,
-            cart.draft_id.clone(),
-            app.sku_id.clone(),
-            1_000,
-            1_000_000,
-        )
-        .expect("add");
-        let view = draft_cancel_impl(&app.state, cart.draft_id.clone()).expect("cancel");
-        assert!(view.lines.is_empty());
+        draft_add_line_impl(&app.state, &cart.draft_id, &app.sku_id, 1_000, 1_000_000)
+            .expect("add");
+        let view = draft_cancel_impl(&app.state, &cart.draft_id).expect("cancel");
+        assert_eq!(view.lines, []);
         assert_eq!(view.totals.total_minor, 0);
         assert_ne!(view.draft_id, cart.draft_id, "a fresh draft is opened");
     }

@@ -142,8 +142,9 @@ fn exclusive_cart_prices_like_the_sale() {
     assert_eq!(priced.total_minor, 11_800);
     assert_eq!(priced.currency_exponent, 2);
     assert_eq!(priced.lines.len(), 1);
-    assert_eq!(priced.lines[0].name, "Test 100");
-    assert_eq!(priced.lines[0].line_total_minor, 11_800);
+    let line = priced.lines.first().unwrap();
+    assert_eq!(line.name, "Test 100");
+    assert_eq!(line.line_total_minor, 11_800);
 }
 
 #[test]
@@ -160,7 +161,8 @@ fn inclusive_cart_prices_like_the_sale() {
     assert_eq!(priced.subtotal_minor, 11_800);
     assert_eq!(priced.tax_minor, 1_800);
     assert_eq!(priced.total_minor, 11_800);
-    assert_eq!(priced.lines[0].line_total_minor, 11_800);
+    let line = priced.lines.first().unwrap();
+    assert_eq!(line.line_total_minor, 11_800);
 }
 
 #[test]
@@ -201,7 +203,7 @@ fn empty_cart_prices_to_zero() {
     assert_eq!(priced.discount_minor, 0);
     assert_eq!(priced.tax_minor, 0);
     assert_eq!(priced.total_minor, 0);
-    assert!(priced.lines.is_empty());
+    assert_eq!(priced.lines, []);
 }
 
 #[test]

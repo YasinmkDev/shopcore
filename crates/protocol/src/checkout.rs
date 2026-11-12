@@ -24,6 +24,7 @@ pub struct SkuHitDto {
     /// The tax group id (for the 001a tax lookup).
     pub tax_group_id: Option<String>,
     /// The active price in `e4` (price x 10^4), if one is configured.
+    #[ts(type = "number | null")]
     pub price_e4: Option<i64>,
 }
 
@@ -38,12 +39,16 @@ pub struct CartLineDto {
     /// The `SKU` display name.
     pub name: String,
     /// Quantity, milli-units.
+    #[ts(type = "number")]
     pub qty_milli: i64,
     /// Unit price at scale 10^4 (locked at scan time).
+    #[ts(type = "number")]
     pub unit_price_e4: i64,
     /// Line discount, minor units (0 = none).
+    #[ts(type = "number")]
     pub discount_minor: i64,
     /// Priced line total (`net + tax`), minor units.
+    #[ts(type = "number")]
     pub line_total_minor: i64,
 }
 
@@ -51,12 +56,16 @@ pub struct CartLineDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct CartTotalsDto {
     /// Sum of line grosses.
+    #[ts(type = "number")]
     pub subtotal_minor: i64,
     /// Sum of line discounts.
+    #[ts(type = "number")]
     pub discount_minor: i64,
     /// Sum of line taxes.
+    #[ts(type = "number")]
     pub tax_minor: i64,
     /// Sum of line totals.
+    #[ts(type = "number")]
     pub total_minor: i64,
 }
 
@@ -133,30 +142,50 @@ pub struct SaleCompletedPayload {
     /// The receipt number.
     pub receipt_no: String,
     /// The sale total, minor units.
+    #[ts(type = "number")]
     pub total_minor: i64,
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
     fn checkout_dtos_export_integers_as_number() {
         // Amendment 3: DTO integers are JSON numbers, typed `number`
-        // in TypeScript (never strings).
-        let exported =
+        // in TypeScript (never strings, never `bigint` — the runtime
+        // values are JSON numbers, range-checked to <= 2^53-1).
+        let line =
+            CartLineDto::export_to_string(&ts_rs::Config::default()).expect("export CartLineDto");
+        assert!(
+            line.contains("qty_milli: number"),
+            "CartLineDto.qty_milli must export as number: {line}"
+        );
+        assert!(
+            line.contains("unit_price_e4: number"),
+            "CartLineDto.unit_price_e4 must export as number: {line}"
+        );
+        assert!(
+            !line.contains("bigint"),
+            "no i64 field may export as bigint: {line}"
+        );
+        let hit = SkuHitDto::export_to_string(&ts_rs::Config::default()).expect("export SkuHitDto");
+        assert!(
+            hit.contains("price_e4: number | null"),
+            "SkuHitDto.price_e4 is Option<i64> — it must export as `number | null`, not `number`: {hit}"
+        );
+        let totals = CartTotalsDto::export_to_string(&ts_rs::Config::default())
+            .expect("export CartTotalsDto");
+        assert!(
+            totals.contains("total_minor: number"),
+            "CartTotalsDto.total_minor must export as number: {totals}"
+        );
+        let view =
             CartViewDto::export_to_string(&ts_rs::Config::default()).expect("export CartViewDto");
         assert!(
-            exported.contains("qty_milli: number"),
-            "CartLineDto.qty_milli must export as number: {exported}"
-        );
-        assert!(
-            exported.contains("total_minor: number"),
-            "CartTotalsDto.total_minor must export as number: {exported}"
-        );
-        assert!(
-            exported.contains("currency_exponent: number"),
-            "currency_exponent must export as number: {exported}"
+            view.contains("currency_exponent: number"),
+            "currency_exponent must export as number: {view}"
         );
     }
 }

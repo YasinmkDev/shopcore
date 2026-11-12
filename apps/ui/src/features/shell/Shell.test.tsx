@@ -7,17 +7,34 @@ import { ThemeProvider } from "../../lib/theme";
 import { Shell } from "./Shell";
 import type { CoreClient } from "../../lib/core-client";
 
+/**
+ * Shell tests (spec 001c-1): the Ping demo is gone — the sell screen
+ * is the main content and the StatusBar is its footer. The header
+ * keeps the theme control and the online pill, now driven by a ping
+ * on mount. The checkout methods never resolve here (the sell screen
+ * stays in its loading state); these tests assert the chrome only.
+ */
 function makeClient(outcome: Pong | Error): CoreClient {
+  const never = (): Promise<never> => new Promise(() => undefined);
   return {
     ping: () =>
       outcome instanceof Error ? Promise.reject(outcome) : Promise.resolve(outcome),
+    getSession: () => never(),
+    getStatus: () => never(),
+    getCart: () => never(),
+    searchSkus: () => never(),
+    lookupBarcode: () => never(),
+    draftAddLine: () => never(),
+    draftSetQty: () => never(),
+    draftRemoveLine: () => never(),
+    draftCancel: () => never(),
+    draftRestoreLine: () => never(),
     subscribe: () => () => {
-      /* no events in spec 000 */
+      /* no events in these tests */
     },
   };
 }
 
-/** Shell reads the theme from context (spec 000b), so tests provide it. */
 function renderShell(client: CoreClient): void {
   const wrapper = ({ children }: { children: ReactNode }): ReactElement => (
     <ThemeProvider store={createMemorySettingsStore()}>{children}</ThemeProvider>
@@ -26,51 +43,28 @@ function renderShell(client: CoreClient): void {
 }
 
 describe("Shell", () => {
-  it("pins the status bar to the bottom of a full-height column", () => {
+  it("renders the sell screen as the main content (no Ping demo)", async () => {
     renderShell(makeClient({ message: "pong" }));
-    const footer = screen.getByRole("contentinfo");
-    const root = footer.parentElement;
-    expect(root).not.toBeNull();
-    // Root fills the viewport (min-height 100vh) as a column.
-    expect(root).toHaveClass("min-h-screen", "flex", "flex-col");
-    // Status bar is the last element; the content area takes the slack.
-    expect(root?.lastElementChild).toBe(footer);
-    expect(screen.getByRole("main")).toHaveClass("flex-1");
+    const main = screen.getByRole("main");
+    expect(main).toHaveClass("flex-1");
+    // The sell screen is loading (checkout methods never resolve).
+    await waitFor(() => {
+      expect(screen.getByText("Loading cart…")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: "Ping" })).not.toBeInTheDocument();
   });
 
-  it("shows the pong message after ping", async () => {
+  it("shows the online pill after the mount ping succeeds", async () => {
     renderShell(makeClient({ message: "pong" }));
-    fireEvent.click(screen.getByRole("button", { name: "Ping" }));
     await waitFor(() => {
-      expect(screen.getByText(/Core replied/)).toBeInTheDocument();
+      expect(screen.getByText("Online")).toBeInTheDocument();
     });
   });
 
-  it("shows the error state when ping fails", async () => {
+  it("shows the offline pill when the mount ping fails", async () => {
     renderShell(makeClient(new Error("boom")));
-    fireEvent.click(screen.getByRole("button", { name: "Ping" }));
     await waitFor(() => {
-      expect(screen.getByRole("alert")).toBeInTheDocument();
-    });
-  });
-
-  it("disables the button while pinging", async () => {
-    let resolvePing!: (pong: Pong) => void;
-    const client: CoreClient = {
-      ping: () =>
-        new Promise<Pong>((resolve) => {
-          resolvePing = resolve;
-        }),
-      subscribe: () => () => {
-        /* no events in spec 000 */
-      },
-    };
-    renderShell(client);
-    fireEvent.click(screen.getByRole("button", { name: "Ping" }));
-    expect(screen.getByRole("button", { name: "Pinging…" })).toBeDisabled();
-    resolvePing({ message: "pong" });
-    await waitFor(() => {
-      expect(screen.getByText(/Core replied/)).toBeInTheDocument();
+      expect(screen.getByText("Offline")).toBeInTheDocument();
     });
   });
 
@@ -78,15 +72,15 @@ describe("Shell", () => {
     renderShell(makeClient({ message: "pong" }));
     const group = screen.getByRole("group", { name: "Theme" });
     expect(group).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Light" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Dark" }));
-    expect(screen.getByRole("button", { name: "Dark" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(screen.getByRole("button", { name: "Light" })).toHaveAttribute("aria-pressed", "true");
+    const dark = screen.getByRole("button", { name: "Dark" });
+    fireEvent.click(dark);
+    expect(dark).toHaveAttribute("aria-pressed", "true");
     expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+  });
+
+  it("has no footer — the StatusBar is the sell screen's footer", () => {
+    renderShell(makeClient({ message: "pong" }));
+    expect(screen.queryByRole("contentinfo")).not.toBeInTheDocument();
   });
 });

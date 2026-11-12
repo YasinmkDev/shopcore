@@ -11,16 +11,45 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import type { Pong } from "@shopcore/protocol-ts";
+import type {
+  CartViewDto,
+  HardwareStatusPayload,
+  Pong,
+  SaleCompletedPayload,
+  SessionDto,
+  SkuHitDto,
+  StatusDto,
+} from "@shopcore/protocol-ts";
 
-/** Core → UI events. No events in spec 000; payload types land with the
- * specs that emit them (e.g. "sale.completed"). */
+/**
+ * Core → UI events. `sale.completed` has no producer until 001c-2
+ * (no sale can complete before `complete_sale_cash` lands); the type
+ * lands in 001c-1 so the contract is fixed. `hardware.status` is
+ * emitted by the desktop for the mock printer; real driver state
+ * changes land with spec 003.
+ */
 export interface ShopCoreEvents {
-  // Intentionally empty for now (see ADR-013 note in the audit reply).
+  "sale.completed": SaleCompletedPayload;
+  "hardware.status": HardwareStatusPayload;
 }
 
 export interface CoreClient {
   ping(): Promise<Pong>;
+  getSession(): Promise<SessionDto | null>;
+  getStatus(): Promise<StatusDto>;
+  getCart(): Promise<CartViewDto>;
+  searchSkus(query: string): Promise<SkuHitDto[]>;
+  lookupBarcode(code: string): Promise<SkuHitDto>;
+  draftAddLine(
+    draftId: string,
+    skuId: string,
+    qtyMilli: number,
+    unitPriceE4: number,
+  ): Promise<CartViewDto>;
+  draftSetQty(draftId: string, lineId: string, qtyMilli: number): Promise<CartViewDto>;
+  draftRemoveLine(draftId: string, lineId: string): Promise<CartViewDto>;
+  draftCancel(draftId: string): Promise<CartViewDto>;
+  draftRestoreLine(draftId: string): Promise<CartViewDto>;
   subscribe<E extends keyof ShopCoreEvents>(
     event: E,
     cb: (payload: ShopCoreEvents[E]) => void,
@@ -30,6 +59,60 @@ export interface CoreClient {
 export class TauriClient implements CoreClient {
   ping(): Promise<Pong> {
     return invoke<Pong>("ping");
+  }
+
+  getSession(): Promise<SessionDto | null> {
+    return invoke<SessionDto | null>("get_session");
+  }
+
+  getStatus(): Promise<StatusDto> {
+    return invoke<StatusDto>("get_status");
+  }
+
+  getCart(): Promise<CartViewDto> {
+    return invoke<CartViewDto>("get_cart");
+  }
+
+  searchSkus(query: string): Promise<SkuHitDto[]> {
+    return invoke<SkuHitDto[]>("search_skus", { query });
+  }
+
+  lookupBarcode(code: string): Promise<SkuHitDto> {
+    return invoke<SkuHitDto>("lookup_barcode", { code });
+  }
+
+  draftAddLine(
+    draftId: string,
+    skuId: string,
+    qtyMilli: number,
+    unitPriceE4: number,
+  ): Promise<CartViewDto> {
+    return invoke<CartViewDto>("draft_add_line", {
+      draft_id: draftId,
+      sku_id: skuId,
+      qty_milli: qtyMilli,
+      unit_price_e4: unitPriceE4,
+    });
+  }
+
+  draftSetQty(draftId: string, lineId: string, qtyMilli: number): Promise<CartViewDto> {
+    return invoke<CartViewDto>("draft_set_qty", {
+      draft_id: draftId,
+      line_id: lineId,
+      qty_milli: qtyMilli,
+    });
+  }
+
+  draftRemoveLine(draftId: string, lineId: string): Promise<CartViewDto> {
+    return invoke<CartViewDto>("draft_remove_line", { draft_id: draftId, line_id: lineId });
+  }
+
+  draftCancel(draftId: string): Promise<CartViewDto> {
+    return invoke<CartViewDto>("draft_cancel", { draft_id: draftId });
+  }
+
+  draftRestoreLine(draftId: string): Promise<CartViewDto> {
+    return invoke<CartViewDto>("draft_restore_line", { draft_id: draftId });
   }
 
   subscribe<E extends keyof ShopCoreEvents>(
@@ -50,6 +133,46 @@ export class TauriClient implements CoreClient {
 
 export class HttpClient implements CoreClient {
   ping(): Promise<Pong> {
+    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
+  }
+
+  getSession(): Promise<SessionDto | null> {
+    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
+  }
+
+  getStatus(): Promise<StatusDto> {
+    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
+  }
+
+  getCart(): Promise<CartViewDto> {
+    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
+  }
+
+  searchSkus(): Promise<SkuHitDto[]> {
+    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
+  }
+
+  lookupBarcode(): Promise<SkuHitDto> {
+    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
+  }
+
+  draftAddLine(): Promise<CartViewDto> {
+    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
+  }
+
+  draftSetQty(): Promise<CartViewDto> {
+    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
+  }
+
+  draftRemoveLine(): Promise<CartViewDto> {
+    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
+  }
+
+  draftCancel(): Promise<CartViewDto> {
+    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
+  }
+
+  draftRestoreLine(): Promise<CartViewDto> {
     return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
   }
 

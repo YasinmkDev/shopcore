@@ -340,6 +340,68 @@ gate test, and the SQLCipher key round-trip. Consequence: the
 OpenSSL build (ADR-022) are unchanged; the Windows CI job must
 still build and pass with vendored OpenSSL.
 
+## Spec 001c-1 judgment calls (2026-11-12, implementation)
+
+The spec lists 7 commands; three more were needed for the initial
+read and are recorded here rather than silently added:
+
+- `get_session` — the `SessionProvider` seam (amendment 4). It returns
+  `Option<SessionDto>`; the command keeps the `Result<_, AppError>`
+  shape every command has (clippy `unnecessary_wraps` allowed on
+  this one fn, with the reason in the code).
+- `get_status` — the status bar's initial state. It re-queries the
+  open shift on every call (stays live); the printer state comes
+  from the mock driver's real `offline` flag; `sync_configured` is a
+  constant `false` until a sync-config spec wires it — never a fake
+  synced state.
+- `get_cart` — req. 6 (render the restored draft). No other command
+  returns the current draft.
+
+Other calls made during implementation:
+
+- `sale.completed`'s payload type lands in 001c-1, but the first
+  emission lands in 001c-2 with `complete_sale_cash` — no sale can
+  complete before then.
+- No PAY button in 001c-1. A dead PAY button is worse than none;
+  the payment panel lands in 001c-2.
+- A scan with no active price (`price_e4: None`) shows an inline
+  "no price" message instead of adding a free line.
+- `draft_cancel` returns a fresh empty cart (a new draft is opened
+  after cancelling) so the UI always has a current draft.
+- IPC integers (amendment 3): ts-rs 12 exports `i64` as `bigint`
+  by default, so every `i64` DTO field carries
+  `#[ts(type = "number")]` — and `Option<i64>` carries
+  `#[ts(type = "number | null")]`, because the override replaces
+  the whole type including the nullability (caught by `tsc`:
+  `price_e4` briefly exported as plain `number`). `gen_types.rs`
+  strips the `import type { X } from "./X"` lines ts-rs emits for
+  referenced types, because all types live in the one generated
+  file (a dangling import broke `tsc` for `CartViewDto`).
+- Tauri commands MUST take owned args (borrowed types cannot be
+  deserialised from the JSON invoke payload), so the `String`
+  params on the `#[tauri::command]` fns are framework-dictated:
+  clippy's `needless_pass_by_value` is allowed on each command fn,
+  and the testable impl fns take `&str`.
+- The ADR-013 drift-guard scanner (`rust_commands`) now skips
+  `#[...]` attribute lines between `#[tauri::command]` and the
+  `fn` — the clippy allows above sit there. A test comment may
+  never contain an invoke string literal: the scanner reads all
+  of `apps/ui/src`, comments included (one was caught this way).
+- Search is debounced 150 ms; the timer is cleared on submit/add/
+  escape, or a stale timer reopens results with the pre-scan text
+  after the scan completes (found in testing).
+- Keyboard shortcuts (+/−/Del/Ctrl+Z) live on the scan input (a
+  native interactive element), not on a layout div — the a11y
+  rules forbid handlers on non-interactive elements, and the input
+  is refocused after every action anyway (row select included).
+- The UI derives printer status from the till status directly,
+  with `hardware.status` events as an override — the previous
+  state+effect needed one extra render cycle and the status bar
+  lagged one frame behind the session.
+- `just dev` runs `tauri dev --features dev-session`; CI has a
+  check-job step compiling the desktop with that feature, so
+  feature-gated code is compiled in CI, not only on a dev machine.
+
 ## ADR-009 assessment (spec 005, 2026-11-10) — KEEP
 The spike's 12 chaos tests all pass against a real Postgres (local) — duplicate delivery, out-of-order batches, connection drop, server restart, clock skew, two tills selling the last unit, upgrade with unsent outbox, snapshot interrupt/resume, full-history replay (byte-identical, unique constraint proven to fire), per-field LWW merge, gap detector, revalidation stub. No chaos test exposed a protocol design flaw, so the stop condition did not trigger. ADR-009 (custom outbox/inbox sync, not generic CRDT) is KEPT for Phase 5. Two notes for Phase 5: (1) the per-tenant sequence lock serializes batches per tenant — under high concurrency this is a throughput ceiling to measure; (2) the snapshot catalog is the set of SKUs the server has seen (via movements/price entries), not the full 500k-SKU catalog — the full-catalog snapshot is the manual target-PC run.
 

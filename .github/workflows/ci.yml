@@ -75,6 +75,12 @@ jobs:
       - name: Run dev-seed tests
         run: cargo nextest run -p shopcore-core --features dev-seed --test seed
 
+      # Spec 001c-1 amendment 4: the dev auto-session is behind the
+      # `dev-session` cargo feature (which enables shopcore-core/dev-seed).
+      # Feature-gated code must compile in CI, not only on a dev machine.
+      - name: Compile desktop with dev-session feature
+        run: cargo check -p shopcore-desktop --all-targets --features dev-session
+
       - name: Check generated types are fresh
         run: |
           just gen-types
