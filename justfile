@@ -30,6 +30,15 @@ dev:
 build:
     ../../../apps/ui/node_modules/.bin/tauri build
 
+# Build the DEV artifact (001c-1 follow-up 4): `dev-session` (which
+# enables the dev seed + dev auto-session) with the dev app identifier
+# from tauri.dev.conf.json. Tauri derives the data folder from the
+# identifier, so the dev build keeps its own shopcore.db/scratch.db
+# and never touches the prod data directory. Same exe path as `build`.
+[working-directory: 'crates/desktop/src-tauri']
+build-dev:
+    ../../../apps/ui/node_modules/.bin/tauri build --features dev-session --config tauri.dev.conf.json
+
 # Full gate. Must exit 0 before any work is considered done.
 check:
     cargo fmt --all -- --check

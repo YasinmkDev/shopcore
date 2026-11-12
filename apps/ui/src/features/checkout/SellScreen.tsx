@@ -23,6 +23,7 @@ import type { CartViewDto, SkuHitDto } from "@shopcore/protocol-ts";
 import type { CoreClient } from "../../lib/core-client";
 import { formatMoney, formatQty } from "../../lib/money";
 import { useSession } from "./SessionProvider";
+import { DevBanner } from "./DevBanner";
 import { ScanInput } from "./ScanInput";
 import { CartTable } from "./CartTable";
 import { TotalsPanel } from "./TotalsPanel";
@@ -483,6 +484,9 @@ export function SellScreen({ client }: { client: CoreClient }): ReactElement {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="relative shrink-0 px-4 pt-4">
+        {status?.dev_build === true ? (
+          <DevBanner client={client} currencyExponent={cart.currency_exponent} />
+        ) : null}
         <ScanInput
           value={input}
           onChange={handleInputChange}

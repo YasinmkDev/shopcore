@@ -45,7 +45,8 @@ use shopcore_core::{Core, CoreError, price_draft_cart};
 use shopcore_db::Db;
 use shopcore_hardware::MockPrinter;
 use shopcore_protocol::{
-    CartLineDto, CartTotalsDto, CartViewDto, Pong, SessionDto, SkuHitDto, StatusDto,
+    CartLineDto, CartTotalsDto, CartViewDto, Pong, SampleBarcodeDto, SessionDto, SkuHitDto,
+    StatusDto,
 };
 use tauri::{AppHandle, Manager, State};
 
@@ -431,6 +432,9 @@ fn get_status_impl(state: &AppState) -> Result<StatusDto, AppError> {
         shift_open,
         printer_status,
         sync_configured: false,
+        // Dev builds (`dev-session`) show the DEV BUILD banner; a
+        // release build is never a dev build.
+        dev_build: cfg!(feature = "dev-session"),
     })
 }
 
@@ -566,6 +570,45 @@ fn get_status(state: State<'_, AppState>) -> Result<StatusDto, AppError> {
     get_status_impl(&state)
 }
 
+/// The sample barcodes for the DEV BUILD banner (001c-1 follow-up 4).
+/// The `#[tauri::command]` fn exists in EVERY build: the ADR-013 drift
+/// guard requires the Rust command set to match the UI invokes exactly,
+/// so a feature-gated command would fail `just check` — but the
+/// implementation is feature-gated. Without `dev-session` it returns
+/// `DEV_NOT_AVAILABLE` and no dev data is compiled into the binary.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn list_sample_barcodes(state: State<'_, AppState>) -> Result<Vec<SampleBarcodeDto>, AppError> {
+    list_sample_barcodes_impl(&state)
+}
+
+#[cfg(feature = "dev-session")]
+fn list_sample_barcodes_impl(state: &AppState) -> Result<Vec<SampleBarcodeDto>, AppError> {
+    let session = state.require_session()?;
+    let rows = shopcore_core::seed::sample_barcodes(state.core.db(), &session.tenant_id)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        check_safe_integer(row.price_minor)?;
+        check_safe_integer(row.rate_bp)?;
+        out.push(SampleBarcodeDto {
+            barcode: row.barcode,
+            name: row.name,
+            price_minor: row.price_minor,
+            tax_mode: row.tax_mode,
+            rate_bp: row.rate_bp,
+        });
+    }
+    Ok(out)
+}
+
+#[cfg(not(feature = "dev-session"))]
+fn list_sample_barcodes_impl(_state: &AppState) -> Result<Vec<SampleBarcodeDto>, AppError> {
+    Err(AppError::new(
+        "DEV_NOT_AVAILABLE",
+        "sample barcodes exist only in dev builds".to_string(),
+    ))
+}
+
 /// The current cart: the terminal's open draft (restored after a
 /// crash/restart, created when none exists) with priced lines + totals.
 #[tauri::command]
@@ -697,6 +740,7 @@ fn main() {
             bench_ui_results,
             get_session,
             get_status,
+            list_sample_barcodes,
             get_cart,
             search_skus,
             lookup_barcode,
@@ -1137,6 +1181,68 @@ mod tests {
         assert!(!status.shift_open);
         assert_eq!(status.printer_status, "ready");
         assert!(!status.sync_configured);
+    }
+
+    /// Without `dev-session` the sample barcodes are unavailable and
+    /// the build is not a dev build: no dev data is compiled in.
+    #[test]
+    #[cfg(not(feature = "dev-session"))]
+    fn sample_barcodes_unavailable_without_dev_session() {
+        let app = TestApp::new();
+        let status = get_status_impl(&app.state).expect("status");
+        assert!(!status.dev_build);
+        let err = list_sample_barcodes_impl(&app.state).unwrap_err();
+        assert_eq!(err.code, "DEV_NOT_AVAILABLE");
+    }
+
+    /// A test `AppState` seeded with the dev seed (dev-session only):
+    /// the 6-SKU sample catalog + cashier session.
+    #[cfg(feature = "dev-session")]
+    fn dev_seed_app() -> (AppState, TempDirGuard) {
+        let dir = TempDirGuard::new();
+        let db = Db::open_in_memory().expect("in-memory db");
+        let scratch = ScratchDb::open(dir.0.join("scratch.db")).expect("scratch db");
+        let report = seed_dev_till(&db, "test-tenant", 1).expect("dev seed");
+        let core = Core::new(db, scratch);
+        let session = Session {
+            tenant_id: "test-tenant".to_string(),
+            branch_id: report.branch_id,
+            branch_code: "MAIN".to_string(),
+            terminal_id: report.terminal_id,
+            terminal_code: "T1".to_string(),
+            user_id: Some("user-1".to_string()),
+            username: Some("cashier".to_string()),
+            shift_id: Some(report.shift_id),
+            currency_code: "PKR".to_string(),
+            currency_exponent: 2,
+        };
+        (AppState::new(core, Some(session)), dir)
+    }
+
+    /// With `dev-session` the command lists the 6 seeded sample
+    /// barcodes with prices and tax modes, and the status flags the
+    /// build as a dev build.
+    #[test]
+    #[cfg(feature = "dev-session")]
+    fn sample_barcodes_lists_the_dev_seed_catalog() {
+        let (state, _dir) = dev_seed_app();
+        assert!(get_status_impl(&state).expect("status").dev_build);
+        let rows = list_sample_barcodes_impl(&state).expect("sample barcodes");
+        assert_eq!(rows.len(), 6);
+        let milk = rows
+            .iter()
+            .find(|row| row.barcode == "1234567890123")
+            .expect("milk barcode");
+        assert_eq!(milk.name, "Milk 1L");
+        assert_eq!(milk.price_minor, 25_000);
+        assert_eq!(milk.tax_mode, "exclusive");
+        assert_eq!(milk.rate_bp, 1800);
+        let bread = rows
+            .iter()
+            .find(|row| row.barcode == "1234567890124")
+            .expect("bread barcode");
+        assert_eq!(bread.price_minor, 12_000);
+        assert_eq!(bread.tax_mode, "zero");
     }
 
     /// Amendment 8: the exit path calls `shutdown` — after it, the

@@ -21,6 +21,7 @@ function makeClient(outcome: Pong | Error): CoreClient {
       outcome instanceof Error ? Promise.reject(outcome) : Promise.resolve(outcome),
     getSession: () => never(),
     getStatus: () => never(),
+    listSampleBarcodes: () => never(),
     getCart: () => never(),
     searchSkus: () => never(),
     lookupBarcode: () => never(),

@@ -28,6 +28,7 @@ import type {
   CartLineDto,
   CartTotalsDto,
   CartViewDto,
+  SampleBarcodeDto,
   SessionDto,
   SkuHitDto,
   StatusDto,
@@ -97,7 +98,17 @@ function appError(code: string, message: string): Error {
 /** Minimal in-memory till: lines + totals, no persistence. */
 class FakeClient implements CoreClient {
   session: SessionDto | null = SESSION;
-  status: StatusDto = { shift_open: false, printer_status: "ready", sync_configured: false };
+  status: StatusDto = {
+    shift_open: false,
+    printer_status: "ready",
+    sync_configured: false,
+    dev_build: false,
+  };
+  /** The dev seed's sample barcodes (001c-1 follow-up 4). */
+  sampleBarcodes: SampleBarcodeDto[] = [
+    { barcode: "1234567890123", name: "Milk 1L", price_minor: 25_000, tax_mode: "exclusive", rate_bp: 1800 },
+    { barcode: "1234567890124", name: "Bread 500g", price_minor: 12_000, tax_mode: "zero", rate_bp: 0 },
+  ];
   lines: CartLineDto[] = [];
   draftId = "draft-1";
   /** The last removed line, for draftRestoreLine. */
@@ -124,6 +135,7 @@ class FakeClient implements CoreClient {
   ping = vi.fn(() => Promise.resolve({ message: "pong" }));
   getSession = vi.fn(() => Promise.resolve(this.session));
   getStatus = vi.fn(() => Promise.resolve(this.status));
+  listSampleBarcodes = vi.fn(() => Promise.resolve(this.sampleBarcodes));
   getCart = vi.fn(() => {
     if (this.cartError) {
       return Promise.reject(new Error("cart failed"));
@@ -222,6 +234,28 @@ describe("SellScreen", () => {
     expect(screen.getByText("Shift closed")).toBeInTheDocument();
     expect(screen.getByText("Printer ready")).toBeInTheDocument();
     expect(screen.getByText("T1")).toBeInTheDocument();
+    // Not a dev build: no DEV BUILD banner.
+    expect(screen.queryByText("DEV BUILD — sample data")).not.toBeInTheDocument();
+  });
+
+  it("shows the DEV BUILD banner with sample barcodes on a dev build", async () => {
+    const client = new FakeClient();
+    client.status = { ...client.status, dev_build: true };
+    renderSellScreen(client);
+    // The banner mounts with the status; the rows arrive one tick
+    // later from listSampleBarcodes — wait for a row, not the title.
+    await waitFor(() => {
+      expect(screen.getByText("Milk 1L")).toBeInTheDocument();
+    });
+    expect(screen.getByText("DEV BUILD — sample data")).toBeInTheDocument();
+    expect(screen.getByText("Sample data only — do not use for real sales.")).toBeInTheDocument();
+    expect(screen.getByText("Milk 1L")).toBeInTheDocument();
+    expect(screen.getByText("1234567890123")).toBeInTheDocument();
+    expect(screen.getByText("250.00")).toBeInTheDocument();
+    expect(screen.getByText("Tax excl. 18%")).toBeInTheDocument();
+    expect(screen.getByText("Bread 500g")).toBeInTheDocument();
+    expect(screen.getByText("Zero-rated")).toBeInTheDocument();
+    expect(client.listSampleBarcodes).toHaveBeenCalled();
   });
 
   it("focuses the scan input on mount", async () => {

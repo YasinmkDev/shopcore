@@ -126,6 +126,29 @@ pub struct StatusDto {
     /// Whether a sync server is configured. `false` until sync is
     /// actually configured — never a fake synced state.
     pub sync_configured: bool,
+    /// True when this is a dev build (`dev-session` feature): the UI
+    /// shows the "DEV BUILD — sample data" banner and the sample
+    /// barcode list. Always `false` in a release build.
+    pub dev_build: bool,
+}
+
+/// One sample barcode (dev builds only, 001c-1 follow-up 4): a row of
+/// the dev seed catalog with its price and tax mode, for the DEV BUILD
+/// banner's list. Prices are minor units of the tenant currency.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SampleBarcodeDto {
+    /// The scannable barcode.
+    pub barcode: String,
+    /// The SKU name (e.g. `"Milk 1L"`).
+    pub name: String,
+    /// The shelf price in minor units (e.g. `25_000` = 250.00 PKR).
+    #[ts(type = "number")]
+    pub price_minor: i64,
+    /// `"exclusive"`, `"inclusive"`, or `"zero"` (zero-rated).
+    pub tax_mode: String,
+    /// The tax rate in basis points (1800 = 18.00%).
+    #[ts(type = "number")]
+    pub rate_bp: i64,
 }
 
 /// `hardware.status` event payload (core → UI): one device's state.

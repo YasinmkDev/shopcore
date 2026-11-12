@@ -21,7 +21,12 @@ const SESSION: SessionDto = {
   currency_code: "PKR",
   currency_exponent: 2,
 };
-const STATUS: StatusDto = { shift_open: true, printer_status: "ready", sync_configured: false };
+const STATUS: StatusDto = {
+  shift_open: true,
+  printer_status: "ready",
+  sync_configured: false,
+  dev_build: false,
+};
 
 function Consumer(): ReactElement {
   const { session, status, loading, error, refresh } = useSession();
@@ -52,6 +57,7 @@ function makeClient(overrides: Partial<Pick<CoreClient, "getSession" | "getStatu
     ping: () => Promise.resolve({ message: "pong" }),
     getSession: overrides.getSession ?? (() => Promise.resolve(SESSION)),
     getStatus: overrides.getStatus ?? (() => Promise.resolve(STATUS)),
+    listSampleBarcodes: () => Promise.resolve([]),
     getCart: () => never(),
     searchSkus: () => never(),
     lookupBarcode: () => never(),

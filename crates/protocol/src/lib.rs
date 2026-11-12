@@ -16,7 +16,7 @@ pub mod time;
 
 pub use checkout::{
     CartLineDto, CartTotalsDto, CartViewDto, HardwareStatusPayload, SaleCompletedPayload,
-    SessionDto, SkuHitDto, StatusDto,
+    SampleBarcodeDto, SessionDto, SkuHitDto, StatusDto,
 };
 pub use sync::{Cursor, OutboxRow, PriceListEntry, PullResponse, SyncAck, SyncBatch, Tombstone};
 pub use time::{from_iso8601, to_iso8601};

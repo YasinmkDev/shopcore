@@ -355,6 +355,48 @@ gate test, and the SQLCipher key round-trip. Consequence: the
 OpenSSL build (ADR-022) are unchanged; the Windows CI job must
 still build and pass with vendored OpenSSL.
 
+## ADR-038 — Separate dev artifact in CI (dev-seed + dev-session, own data folder). Accepted 2026-11-12 (owner decision, 001c-1 follow-up 4)
+
+CI builds a second Windows artifact, `shopcore-desktop-dev`, from
+`just build-dev`: `tauri build --features dev-session --config
+tauri.dev.conf.json`. The dev config overrides ONLY the app
+identifier (`com.shopcore.desktop.dev`); the product name stays
+`ShopCore`, so the exe name stays `shopcore-desktop.exe` and the
+window title is unchanged — the in-UI banner is what distinguishes
+the build. Tauri derives the data folder from the identifier
+(`app.path().app_data_dir()`), so the dev build keeps its own
+`shopcore.db` / `scratch.db` and never touches the prod data
+directory. No data-dir override flag or env var is needed.
+
+The dev build shows a visible "DEV BUILD — sample data" banner
+above the scan input (gated on `StatusDto.dev_build`, set from
+`cfg!(feature = "dev-session")`) and lists the sample barcodes
+with prices and tax modes, read from the LIVE seeded catalog
+(`shopcore_core::seed::sample_barcodes`, price converted through
+the domain's `line_gross` for one unit — never a bare division),
+not from hardcoded constants.
+
+Two deliberate deviations from the brief's plan, both forced by
+the ADR-013 drift guard (which requires the Rust command set to
+match the UI invokes EXACTLY, with no allowlist):
+
+- The `list_sample_barcodes` `#[tauri::command]` fn exists in EVERY
+  build; only its implementation is feature-gated (without
+  `dev-session` it returns `DEV_NOT_AVAILABLE`). A literally
+  cfg-gated command would fail `just check`, because the UI's
+  `invoke("list_sample_barcodes")` is unconditional. No dev data is
+  compiled into a release build — the real impl and the seed module
+  are both behind `dev-seed` / `dev-session`.
+- The `build-dev` CI job greps the dev binary for the marker
+  POSITIVELY (must be FOUND). The release-absence step in
+  `build-windows` is untouched and still runs.
+
+`workflow_dispatch` was added to the workflow triggers so the
+branch run can be dispatched manually (`gh workflow run ci.yml
+--ref wip/001c-1`); a push to a WIP branch does not trigger CI.
+The check job also runs the desktop tests with `dev-session` on,
+covering the feature-gated command impl and the `dev_build` flag.
+
 ## Spec 001c-1 judgment calls (2026-11-12, implementation)
 
 The spec lists 7 commands; three more were needed for the initial

@@ -11,11 +11,13 @@
 //! fixtures, not secrets — the seed never runs in a release build.
 
 use shopcore_db::Db;
+use shopcore_domain::{Qty, UnitPrice, line_gross};
 
 use crate::CoreError;
 use crate::settings::{
     KEY_ACTIVE_PRICE_LIST, KEY_CASH_ROUNDING_GRANULARITY_MINOR, KEY_TAX_DEFAULT_RATE_BP,
-    KEY_TENANT_CURRENCY, KEY_TENANT_CURRENCY_EXPONENT, SCOPE_TENANT, set_setting,
+    KEY_TENANT_CURRENCY, KEY_TENANT_CURRENCY_EXPONENT, SCOPE_TENANT, get_setting, get_setting_i64,
+    set_setting,
 };
 use crate::users::{create_role, create_user};
 
@@ -345,4 +347,106 @@ pub fn seed_dev_till(db: &Db, tenant_id: &str, now_ms: i64) -> Result<SeedReport
         price_list_id,
         sku_count,
     })
+}
+
+/// One row of the seeded sample catalog, for the DEV BUILD banner's
+/// barcode list (001c-1 follow-up 4). Prices are minor units of the
+/// tenant currency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SampleBarcode {
+    /// The scannable barcode.
+    pub barcode: String,
+    /// The SKU name (e.g. `"Milk 1L"`).
+    pub name: String,
+    /// The shelf price in minor units (e.g. `25_000` = 250.00 PKR).
+    pub price_minor: i64,
+    /// `"exclusive"`, `"inclusive"`, or `"zero"` (zero-rated).
+    pub tax_mode: String,
+    /// The tax rate in basis points (1800 = 18.00%).
+    pub rate_bp: i64,
+}
+
+/// List the seeded sample catalog: barcode, name, price and tax mode
+/// for every SKU with an active price. Reads the LIVE catalog (not the
+/// seed constants), so the list always matches what the till can
+/// actually scan. Empty when no active price list is set. The price is
+/// converted from the stored e4 price through the domain's rounding
+/// rule (`line_gross` for one unit) — never a bare division.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Db`] if a read fails, and
+/// [`CoreError::Domain`] if a stored price is negative.
+pub fn sample_barcodes(db: &Db, tenant_id: &str) -> Result<Vec<SampleBarcode>, CoreError> {
+    let Some(price_list_id) = get_setting(db, tenant_id, SCOPE_TENANT, "", KEY_ACTIVE_PRICE_LIST)?
+    else {
+        return Ok(Vec::new());
+    };
+    let exponent = get_setting_i64(
+        db,
+        tenant_id,
+        SCOPE_TENANT,
+        "",
+        KEY_TENANT_CURRENCY_EXPONENT,
+    )?
+    .and_then(|exponent| u32::try_from(exponent).ok())
+    .unwrap_or(2);
+    let rows: Vec<(String, String, i64, i64, i64)> = {
+        let tenant_id = tenant_id.to_string();
+        db.read(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT b.code, s.name, ple.price_e4, tg.price_includes_tax, \
+                 COALESCE((SELECT SUM(rate_bp) FROM tax_rate WHERE tax_group_id = tg.id AND tenant_id = tg.tenant_id AND deleted_at IS NULL), 0) \
+                 FROM barcode b \
+                 JOIN sku s ON s.id = b.sku_id AND s.tenant_id = b.tenant_id \
+                 JOIN tax_group tg ON tg.id = s.tax_group_id AND tg.tenant_id = s.tenant_id \
+                 JOIN price_list_entry ple ON ple.sku_id = s.id AND ple.price_list_id = ?1 AND ple.deleted_at IS NULL \
+                 WHERE b.tenant_id = ?2 AND b.is_primary = 1 \
+                 AND b.deleted_at IS NULL AND s.deleted_at IS NULL AND tg.deleted_at IS NULL \
+                 ORDER BY b.code ASC",
+            )?;
+            let rows = stmt.query_map(
+                rusqlite::params![price_list_id, tenant_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })?
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for (barcode, name, price_e4, includes_tax, rate_bp) in rows {
+        let price_minor = line_gross(
+            UnitPrice::from_e4(price_e4)?,
+            Qty::from_milli(1000)?,
+            exponent,
+        )?
+        .minor();
+        let tax_mode = if rate_bp == 0 {
+            "zero"
+        } else if includes_tax == 1 {
+            "inclusive"
+        } else {
+            "exclusive"
+        }
+        .to_string();
+        out.push(SampleBarcode {
+            barcode,
+            name,
+            price_minor,
+            tax_mode,
+            rate_bp,
+        });
+    }
+    Ok(out)
 }

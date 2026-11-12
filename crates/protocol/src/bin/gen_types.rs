@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shopcore_protocol::StatusDto::export_to_string(&ts_rs::Config::default())?,
         shopcore_protocol::HardwareStatusPayload::export_to_string(&ts_rs::Config::default())?,
         shopcore_protocol::SaleCompletedPayload::export_to_string(&ts_rs::Config::default())?,
+        shopcore_protocol::SampleBarcodeDto::export_to_string(&ts_rs::Config::default())?,
     ] {
         for line in exported.lines() {
             if !line.starts_with("import type {") {

@@ -16,6 +16,7 @@ import type {
   HardwareStatusPayload,
   Pong,
   SaleCompletedPayload,
+  SampleBarcodeDto,
   SessionDto,
   SkuHitDto,
   StatusDto,
@@ -37,6 +38,8 @@ export interface CoreClient {
   ping(): Promise<Pong>;
   getSession(): Promise<SessionDto | null>;
   getStatus(): Promise<StatusDto>;
+  /** Dev builds only: the sample barcodes (001c-1 follow-up 4). */
+  listSampleBarcodes(): Promise<SampleBarcodeDto[]>;
   getCart(): Promise<CartViewDto>;
   searchSkus(query: string): Promise<SkuHitDto[]>;
   lookupBarcode(code: string): Promise<SkuHitDto>;
@@ -67,6 +70,10 @@ export class TauriClient implements CoreClient {
 
   getStatus(): Promise<StatusDto> {
     return invoke<StatusDto>("get_status");
+  }
+
+  listSampleBarcodes(): Promise<SampleBarcodeDto[]> {
+    return invoke<SampleBarcodeDto[]>("list_sample_barcodes");
   }
 
   getCart(): Promise<CartViewDto> {
@@ -141,6 +148,10 @@ export class HttpClient implements CoreClient {
   }
 
   getStatus(): Promise<StatusDto> {
+    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
+  }
+
+  listSampleBarcodes(): Promise<SampleBarcodeDto[]> {
     return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
   }
 
