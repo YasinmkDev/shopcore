@@ -17,6 +17,8 @@ use shopcore_core::settings::{
 };
 use shopcore_core::users::{create_role, create_user};
 use shopcore_db::{Db, migrations::run_migrations};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 pub const TENANT: &str = "tenant-001";
 pub const NOW: i64 = 1_700_000_000_000;
@@ -159,4 +161,90 @@ pub fn setup_pricing(db: &Db) -> (String, String) {
     )
     .unwrap();
     (tax_group_id, price_list_id)
+}
+
+// ---------------------------------------------------------------------------
+// Test scratch directories (fix for the 2026-11-11 template-dir collision).
+//
+// The old helper named dirs `{label}-{pid}-{n}` under a never-cleaned
+// `target/test-tmp-*/` root. PIDs are reused across runs, so a new test
+// process could reopen a leftover template DB and the role seeding
+// failed with `UNIQUE constraint failed: role.tenant_id, role.name`.
+// The fix: PID + a random UUIDv7 (unique per process AND per dir),
+// `create_dir` (never `create_dir_all`) so a collision fails loudly,
+// stale dirs older than 1 hour removed at startup, and the template dir
+// removed at process exit (best effort, ADR-035).
+// ---------------------------------------------------------------------------
+
+/// Root for the sale/crash test scratch dirs (real disk, not `/tmp`
+/// tmpfs — the crash tests need real `fsync` behaviour).
+pub fn test_root_001b2() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-tmp-001b2")
+}
+
+/// Root for the scratch-DB test dirs (same reason as `test_root_001b2`).
+pub fn test_root_scratch() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-tmp-scratch")
+}
+
+/// A unique test scratch directory under `root`, created with
+/// `create_dir` (fail loudly if it exists). The name is
+/// `{label}-{pid}-{uuidv7}`: the PID alone is NOT unique across runs,
+/// and the UUID makes a collision across runs and within a run
+/// effectively impossible. The caller owns the dir and must remove it
+/// (per-test dirs via `Drop` or an explicit removal; the template dir
+/// via `register_exit_cleanup_dir`).
+pub fn unique_test_dir(root: &Path, label: &str) -> PathBuf {
+    cleanup_stale_test_dirs(root);
+    // Ensure the shared root exists. `create_dir` + ignore
+    // `AlreadyExists` (the root is shared, not per-test — only the LEAF
+    // must be fresh, and it is created with `create_dir` below).
+    match std::fs::create_dir(root) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => panic!("cannot create test root {}: {e}", root.display()),
+    }
+    let dir = root.join(format!(
+        "{label}-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir(&dir).unwrap_or_else(|e| {
+        panic!(
+            "test dir {} already exists (UUID collision or stale dir): {e}",
+            dir.display()
+        )
+    });
+    dir
+}
+
+/// Remove test scratch subdirs older than 1 hour under `root` (best
+/// effort). Runs on every `unique_test_dir` call: a concurrently-running
+/// test process only has fresh dirs (< 1 hour), so it is never touched;
+/// dirs from a killed or crashed run are reclaimed by the next run.
+/// The 1-hour threshold also means a test run that itself lasts longer
+/// than an hour is not affected (a full `just check` takes ~4 min).
+///
+/// This is also what removes the template dir: the template lives in a
+/// `OnceLock`, so no `Drop` ever runs for it, and a process-exit hook
+/// (`atexit`) is NOT used — it needs `unsafe`, and the workspace
+/// forbids `unsafe` code (`unsafe_code = "forbid"`, root `Cargo.toml`).
+/// The stale-cleanup bounds the accumulation to ~1 hour of runs, and
+/// `just clean-test-tmp` removes everything on demand (ADR-035).
+fn cleanup_stale_test_dirs(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let cutoff = SystemTime::now() - Duration::from_secs(3600);
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if mtime < cutoff {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }

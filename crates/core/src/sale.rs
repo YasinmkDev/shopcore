@@ -11,18 +11,16 @@
 //! the same `draft_id` returns the EXISTING sale (no second sale, no
 //! second stock posting).
 //!
-//! Tax mode: the schema stores NO inclusive/exclusive flag on a tax
-//! group (and no tenant setting for it), so the mode is a parameter
-//! ([`TaxMode`], default [`TaxMode::Exclusive`]). The inclusive path
-//! is fully supported by the domain and tested through
-//! [`tax_spec_for_group`]; a per-tax-group `tax_inclusive` flag (a
-//! schema change) is needed before an inclusive-priced market can be
-//! served without passing the mode in — recorded in the 001b-2 session
-//! summary as an open gap, not silently guessed.
+//! Tax mode: the mode comes from the DATA — each line's tax group
+//! carries `price_includes_tax` (0 = exclusive, 1 = inclusive), so a
+//! sale's lines may mix modes and each line uses its own group's flag
+//! ([`tax_spec_for_group`]). There is no sale-level mode parameter and
+//! no tenant default (owner decision 2026-11-11).
 //!
 //! Timestamps: epoch-ms integers + the `now_ms` helper, consistent
-//! with 001b-1 (the owner is deciding whether to migrate to ISO-8601
-//! TEXT; until he decides, no new timestamp code uses ISO-8601).
+//! with 001b-1 (owner decision 2026-11-11: epoch ms stays in the DB;
+//! ISO-8601 UTC with `Z` is the wire/export format only, converted in
+//! the `protocol` crate).
 //!
 //! Hardware never blocks the commit: the sale writes a `print_job`
 //! row (status `queued`) and returns the [`PrintDoc`]; the caller
@@ -153,17 +151,6 @@ impl PrintStatus {
     }
 }
 
-/// How a tax group's rates apply to the shelf price. The schema stores
-/// no flag for this (see the module docs), so the mode is a parameter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TaxMode {
-    /// Tax added on top of the (discounted) amount.
-    #[default]
-    Exclusive,
-    /// Tax included in the shelf price.
-    Inclusive,
-}
-
 /// A fault-injection point for the crash tests (spec 001b-2, `11`).
 /// The sale use case checks the injector at each commit step; a `Fail`
 /// fault returns [`SaleError::FaultInjected`] (the transaction rolls
@@ -278,9 +265,6 @@ pub struct CompleteSaleCashInput {
     /// The sale date as `yyyymmdd` (for the receipt number and the
     /// daily aggregates).
     pub date_yyyymmdd: String,
-    /// How the tax group's rates apply (no flag is stored — see the
-    /// module docs).
-    pub tax_mode: TaxMode,
 }
 
 /// A completed cash sale.
@@ -307,6 +291,18 @@ pub struct SaleCompleted {
     /// `true` when this call committed a NEW sale; `false` when it
     /// returned an already-completed sale (idempotent replay).
     pub is_fresh: bool,
+}
+
+impl SaleCompleted {
+    /// `true` when this call returned an already-completed sale
+    /// (idempotent replay) instead of committing a new one — the
+    /// inverse of [`Self::is_fresh`]. The returned sale is the
+    /// ORIGINAL sale, unchanged: same id, totals, and change as the
+    /// first call, regardless of the tender this call passed.
+    #[must_use]
+    pub fn already_completed(&self) -> bool {
+        !self.is_fresh
+    }
 }
 
 /// The stock posting function — the ONLY writer of `stock_balance`
@@ -396,7 +392,9 @@ pub fn negative_stock_skus(
 /// incomplete — tax cannot be computed without a group, and a
 /// `sale_line_tax` row needs a `tax_rate_id`). A group with NO rate
 /// rows, or with ALL rates zero, is exempt (no `sale_line_tax` rows).
-/// Otherwise the rates apply per `mode`.
+/// Otherwise the rates apply per the group's `price_includes_tax`
+/// flag (0 = exclusive, 1 = inclusive) — the mode comes from the
+/// data, so a sale's lines may mix modes.
 ///
 /// # Errors
 ///
@@ -406,13 +404,22 @@ pub fn tax_spec_for_group(
     tx: &Transaction<'_>,
     tenant_id: &str,
     tax_group_id: Option<&str>,
-    mode: TaxMode,
 ) -> Result<(TaxSpec, Vec<(String, i64)>), SaleError> {
     let Some(group_id) = tax_group_id else {
         return Err(SaleError::InvalidInput(
             "SKU has no tax group; tax cannot be computed".to_string(),
         ));
     };
+    // The mode comes from the data (owner decision 2026-11-11): a
+    // missing group row reads as exclusive (the column defaults to 0).
+    let price_includes_tax: i64 = tx
+        .query_row(
+            "SELECT price_includes_tax FROM tax_group WHERE tenant_id = ?1 AND id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![tenant_id, group_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
     let mut stmt = tx.prepare(
         "SELECT id, rate_bp FROM tax_rate WHERE tenant_id = ?1 AND tax_group_id = ?2 AND deleted_at IS NULL ORDER BY created_at, id",
     )?;
@@ -445,9 +452,10 @@ pub fn tax_spec_for_group(
             .map_err(|_| SaleError::InvalidInput(format!("tax rate {bp} bp is out of range")))?;
         rates.push(Rate::from_basis_points(bp_u32).map_err(SaleError::Domain)?);
     }
-    let spec = match mode {
-        TaxMode::Exclusive => TaxSpec::Exclusive { rates },
-        TaxMode::Inclusive => TaxSpec::Inclusive { rates },
+    let spec = if price_includes_tax != 0 {
+        TaxSpec::Inclusive { rates }
+    } else {
+        TaxSpec::Exclusive { rates }
     };
     Ok((spec, pairs))
 }
@@ -514,7 +522,6 @@ struct SaleCtx {
     tender_minor: i64,
     now_ms: i64,
     date_yyyymmdd: String,
-    tax_mode: TaxMode,
     currency_exponent: u32,
     cash_rounding: CashRounding,
     draft_lines: Vec<DraftLine>,
@@ -636,7 +643,6 @@ pub fn complete_sale_cash(
         tender_minor: input.tender_minor,
         now_ms: input.now_ms,
         date_yyyymmdd: input.date_yyyymmdd,
-        tax_mode: input.tax_mode,
         currency_exponent,
         cash_rounding,
         draft_lines: draft.lines,
@@ -840,8 +846,7 @@ fn price_draft_lines(
             )
             .optional()?
             .ok_or_else(|| SaleError::NotFound(format!("sku {} does not exist", line.sku_id)))?;
-        let (tax, rate_pairs) =
-            tax_spec_for_group(tx, &ctx.tenant_id, tax_group_id.as_deref(), ctx.tax_mode)?;
+        let (tax, rate_pairs) = tax_spec_for_group(tx, &ctx.tenant_id, tax_group_id.as_deref())?;
         let line_discount = if line.discount_minor > 0 {
             LineDiscount::Fixed(Money::from_minor(line.discount_minor))
         } else {
@@ -1111,11 +1116,12 @@ fn write_sale_audit(
 
 /// Writes the outbox rows (same transaction): one for the sale, plus
 /// one pending row per (branch, sku) whose stock moved. The outbox
-/// schema is the 001b-1 table as migrated (`entity`/`entity_id`/
-/// `payload`) — req. 9's reference to the spec-005 columns (`stream`,
-/// `idempotency_key`, `branch_id`) does not match that table, so the
-/// stream/branch info travels inside the JSON payload (see the 001b-2
-/// session summary — owner decision needed to reconcile).
+/// table carries the spec-005 columns (owner decision 2026-11-11 —
+/// the migration was rewritten): `branch_id`, `entity`, `stream`,
+/// `payload`, `idempotency_key` (= the row's own `UUIDv7`). The sale
+/// row goes on stream `sale`; each stock row goes on stream
+/// `stock_movement` with the payload the server's apply reads
+/// (`sku_id`, `qty_milli`, `occurred_at_ms`).
 fn write_sale_outbox(
     tx: &Transaction<'_>,
     ctx: &SaleCtx,
@@ -1136,8 +1142,8 @@ fn write_sale_outbox(
     );
     let outbox_sale_id = uuid::Uuid::now_v7().to_string();
     tx.execute(
-        "INSERT INTO outbox (id, tenant_id, entity, entity_id, payload, created_at, sent_at, attempts, updated_at, version) VALUES (?1, ?2, 'sale', ?3, ?4, ?5, NULL, 0, ?5, 1)",
-        rusqlite::params![outbox_sale_id, ctx.tenant_id, sale_id, sale_payload, ctx.now_ms],
+        "INSERT INTO outbox (id, tenant_id, branch_id, entity, stream, payload, idempotency_key, created_at, sent_at, attempts, updated_at, version) VALUES (?1, ?2, ?3, 'sale', 'sale', ?4, ?1, ?5, NULL, 0, ?5, 1)",
+        rusqlite::params![outbox_sale_id, ctx.tenant_id, ctx.branch_id, sale_payload, ctx.now_ms],
     )?;
     // One pending row per (branch, sku) whose stock moved — a `SKU`
     // on two lines (different prices) still gets ONE stock row, with
@@ -1160,13 +1166,13 @@ fn write_sale_outbox(
     }
     for (sku_id, qty, balance) in &stock_rows {
         let stock_payload = format!(
-            "{{\"type\":\"stock\",\"branch_id\":\"{}\",\"sku_id\":\"{sku_id}\",\"qty_milli\":{qty},\"balance_minor\":{balance},\"sale_id\":\"{sale_id}\"}}",
-            ctx.branch_id
+            "{{\"sku_id\":\"{sku_id}\",\"qty_milli\":{qty},\"occurred_at_ms\":{},\"balance_minor\":{balance},\"sale_id\":\"{sale_id}\"}}",
+            ctx.now_ms
         );
         let outbox_stock_id = uuid::Uuid::now_v7().to_string();
         tx.execute(
-            "INSERT INTO outbox (id, tenant_id, entity, entity_id, payload, created_at, sent_at, attempts, updated_at, version) VALUES (?1, ?2, 'stock', ?3, ?4, ?5, NULL, 0, ?5, 1)",
-            rusqlite::params![outbox_stock_id, ctx.tenant_id, sku_id, stock_payload, ctx.now_ms],
+            "INSERT INTO outbox (id, tenant_id, branch_id, entity, stream, payload, idempotency_key, created_at, sent_at, attempts, updated_at, version) VALUES (?1, ?2, ?3, 'stock_movement', 'stock_movement', ?4, ?1, ?5, NULL, 0, ?5, 1)",
+            rusqlite::params![outbox_stock_id, ctx.tenant_id, ctx.branch_id, stock_payload, ctx.now_ms],
         )?;
     }
     Ok(())

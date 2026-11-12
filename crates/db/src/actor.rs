@@ -38,9 +38,22 @@ pub struct Db {
 
 /// The shared state behind a `Db` handle.
 struct DbInner {
-    /// Sender side of the actor channel. Dropping the last `Db` closes
-    /// the channel and the actor thread exits.
-    write_tx: mpsc::Sender<WriteJob>,
+    /// Sender side of the actor channel. `None` after [`Db::shutdown`]
+    /// (or after the last `Db` is dropped): closing the channel is what
+    /// makes the actor thread exit its loop. Behind a `Mutex` so
+    /// `shutdown` can close it from `&self` while other clones still
+    /// exist (their later `write` calls then fail with `ActorStopped`,
+    /// which is the correct shutdown semantic).
+    write_tx: Mutex<Option<mpsc::Sender<WriteJob>>>,
+    /// The actor thread's join handle. `None` after it has been joined
+    /// (or before the thread was spawned, which never happens — the
+    /// handle is set in `from_write_connection`). Behind a `Mutex` so
+    /// `shutdown` can take it from `&self`. Joined on shutdown so no
+    /// detached thread outlives the `Db` (a detached actor thread that
+    /// is still closing its `SQLCipher` connection while the database
+    /// files are deleted segfaults — the WAL `-shm` file is
+    /// memory-mapped; see `context/08-decisions.md` ADR-036).
+    actor_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Pool of read-only connections. `Connection` is `Send` but not
     /// `Sync`, so the pool itself is behind a `Mutex`.
     read_pool: Mutex<Vec<Connection>>,
@@ -51,6 +64,12 @@ struct DbInner {
     /// every connection the pool opens, and to the write connection.
     key_hex: Option<String>,
 }
+
+/// How long [`Db::shutdown`] waits for the actor thread to exit before
+/// giving up (the thread only has to finish its current job and close
+/// the connection, so this should never be hit; a hit means the actor
+/// is stuck and the caller must know).
+const SHUTDOWN_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Db {
     /// Open (or create) the database at `path` and run migrations on the
@@ -107,10 +126,18 @@ impl Db {
             run: Box::new(f),
             reply: tx,
         };
-        self.inner
+        // Clone the sender out of the `Mutex` so the lock is not held
+        // while sending (the channel is unbounded, so the send itself
+        // never blocks, but cloning keeps the critical section short).
+        // `None` means `shutdown` ran: no more writes are accepted.
+        let sender = self
+            .inner
             .write_tx
-            .send(job)
-            .map_err(|_| DbError::ActorStopped)?;
+            .lock()
+            .map_err(|_| DbError::InvalidInput("write channel lock poisoned".to_string()))?
+            .clone()
+            .ok_or(DbError::ActorStopped)?;
+        sender.send(job).map_err(|_| DbError::ActorStopped)?;
         rx.recv().map_err(|_| DbError::ActorStopped)?
     }
 
@@ -134,29 +161,55 @@ impl Db {
     }
 
     /// Spawn the actor thread around an already-opened, already-migrated
-    /// write connection.
+    /// write connection. The thread's join handle is kept in the inner
+    /// so [`Db::shutdown`] (and the inner's `Drop`) can join it — the
+    /// thread must be joined, never detached, before the database files
+    /// are deleted (ADR-036).
     fn from_write_connection(
         write: Connection,
         connect_target: String,
         key_hex: Option<String>,
     ) -> Self {
         let (write_tx, write_rx) = mpsc::channel::<WriteJob>();
-        std::thread::spawn(move || {
+        let actor_handle = std::thread::spawn(move || {
             let mut conn = write;
             while let Ok(job) = write_rx.recv() {
                 let result = (job.run)(&mut conn);
                 // The caller may have gone away; the result is dropped.
                 let _ = job.reply.send(result);
             }
+            // `conn` drops here, on the actor thread, after the loop
+            // exits (channel closed) — `sqlite3_close` runs while no
+            // other thread can still be using the database.
         });
         Self {
             inner: std::sync::Arc::new(DbInner {
-                write_tx,
+                write_tx: Mutex::new(Some(write_tx)),
+                actor_handle: Mutex::new(Some(actor_handle)),
                 read_pool: Mutex::new(Vec::new()),
                 connect_target,
                 key_hex,
             }),
         }
+    }
+
+    /// Gracefully shut the actor thread down and close every
+    /// connection: close the command channel (so the actor thread exits
+    /// its loop), join the actor thread (with a timeout), then close
+    /// the pooled read connections. Idempotent — a second call is a
+    /// no-op. After this returns `Ok`, no thread is still using the
+    /// database files, so the caller may delete them.
+    ///
+    /// Call this before deleting the database files, and call it from
+    /// the app's exit path (see `Core::shutdown`). Never call it from
+    /// the actor thread itself (it would deadlock joining itself).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::ShutdownTimeout`] if the actor thread did not
+    /// exit within the timeout (it is stuck — do NOT delete the files).
+    pub fn shutdown(&self) -> Result<(), DbError> {
+        self.inner.shutdown_inner()
     }
 
     /// Take a read-only connection from the pool, opening a new one if the
@@ -181,6 +234,61 @@ impl Db {
         if let Ok(mut pool) = self.inner.read_pool.lock() {
             pool.push(conn);
         }
+    }
+}
+
+impl DbInner {
+    /// The shared shutdown path, called by [`Db::shutdown`] and by the
+    /// inner's `Drop` (last `Db` clone gone). Closes the command
+    /// channel, joins the actor thread with a timeout, then closes the
+    /// pooled read connections. Idempotent.
+    fn shutdown_inner(&self) -> Result<(), DbError> {
+        // Close the channel first: taking the sender out is what makes
+        // the actor thread's `recv` fail and its loop exit. (The
+        // channel was the only sender, so no other clone can re-open
+        // it; their later `write` calls fail with `ActorStopped`.)
+        if let Ok(mut tx) = self.write_tx.lock() {
+            *tx = None;
+        }
+        // Join the actor thread. `is_finished` is polled so the wait
+        // is bounded: a stuck actor must be reported, not waited on
+        // forever (and never joined from the actor thread itself —
+        // `shutdown` is never called there).
+        let handle = self
+            .actor_handle
+            .lock()
+            .map_err(|_| DbError::InvalidInput("actor handle lock poisoned".to_string()))?
+            .take();
+        if let Some(handle) = handle {
+            let deadline = std::time::Instant::now() + SHUTDOWN_JOIN_TIMEOUT;
+            while !handle.is_finished() {
+                if std::time::Instant::now() >= deadline {
+                    return Err(DbError::ShutdownTimeout);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            // The thread finished; joining now cannot block. A panic
+            // in the actor is a defect — surface it rather than
+            // swallowing it.
+            handle.join().map_err(|_| DbError::ActorStopped)?;
+        }
+        // Close the pooled read connections explicitly (dropping the
+        // `Vec` closes each `Connection`).
+        if let Ok(mut pool) = self.read_pool.lock() {
+            pool.clear();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for DbInner {
+    fn drop(&mut self) {
+        // Best-effort graceful shutdown (same path as `Db::shutdown`):
+        // close the channel, join the actor thread, close the read
+        // pool. A failure here (stuck actor) cannot be reported from
+        // `Drop`, but the explicit `shutdown` call — which the app and
+        // the tests use before deleting the files — does report it.
+        let _ = self.shutdown_inner();
     }
 }
 

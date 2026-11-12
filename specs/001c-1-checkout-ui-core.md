@@ -23,6 +23,15 @@ Phase: 1   Depends on: 000 (scaffold), 000b (Button/TextField + dark theme + `us
    / `draft_restore_line` (001b-2).
 7. Accessibility: a live region announces the scanned item and the new
    total; tested.
+8. Graceful shutdown (owner decision 2026-11-12, ADR-036): the app
+   holds ONE `Core` (`shopcore_core::Core`, owning the `Db` and the
+   `ScratchDb`) in Tauri managed state, and the Tauri exit event
+   MUST call `Core::shutdown()` before the process exits — the
+   actor and timer threads are joined (5 s timeout) and the
+   connections closed, so the process cannot segfault during
+   teardown. A test asserts the exit path calls `shutdown` (the
+   desktop crate exposes the shutdown for the test, or the test
+   drives the `Core` directly).
 
 ## Goal (one sentence, user-visible outcome)
 A cashier scans, totals, and sees the cart on a fast, keyboard-first sell

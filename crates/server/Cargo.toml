@@ -29,6 +29,10 @@ zstd = { workspace = true }
 # it with the sync client over real HTTP.
 rusqlite = { workspace = true }
 shopcore-sync-client = { path = "../sync-client", version = "0.1.0" }
+# The till→server integration test builds a real till (001b-1 migrations +
+# 001b-2 sale use cases) and pushes its outbox rows to the real server.
+shopcore-core = { path = "../core", version = "0.1.0" }
+shopcore-db = { path = "../db", version = "0.1.0" }
 
 [lints]
 workspace = true

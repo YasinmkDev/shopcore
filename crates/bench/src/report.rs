@@ -20,6 +20,13 @@ use crate::BenchError;
 /// change is 5–10x), not VM noise.
 pub const BASELINE_TOLERANCE_FACTOR: f64 = 5.0;
 
+/// Scenario names excluded from the regression tripwire: informational
+/// only, still printed/reported and still recorded in the baseline.
+/// `6 report (raw sale_line)` is a single-sample, cache-sensitive raw
+/// scan (baseline 130.218 ms) — it exists to show why aggregates exist,
+/// not to gate CI, so a >5x swing on it must never fail a smoke run.
+pub const BASELINE_TRIPWIRE_EXCLUDED_SCENARIOS: &[&str] = &["6 report (raw sale_line)"];
+
 /// Machine the numbers were measured on. Fields that cannot be detected
 /// are recorded as `"unknown"` — never guessed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -450,11 +457,16 @@ impl Baseline {
     /// Compare `results` against this baseline. Returns the list of
     /// violations (empty = within tolerance). A metric fails only when it
     /// exceeds `BASELINE_TOLERANCE_FACTOR` × its baseline value.
+    /// Metrics in [`BASELINE_TRIPWIRE_EXCLUDED_SCENARIOS`] are skipped:
+    /// informational only, never tripping.
     #[must_use]
     pub fn violations(&self, results: &Results) -> Vec<String> {
         let mut out = Vec::new();
         for s in &results.scenarios {
             if s.not_measured {
+                continue;
+            }
+            if BASELINE_TRIPWIRE_EXCLUDED_SCENARIOS.contains(&s.name.as_str()) {
                 continue;
             }
             let key = format!("{} :: {}", s.name, s.metric);

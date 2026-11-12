@@ -17,9 +17,9 @@ pub const ARGON2_T_COST: u32 = 2;
 /// Argon2id parallelism in lanes (the OWASP minimum).
 pub const ARGON2_P_COST: u32 = 1;
 
-/// The PIN a dummy hash is made from. Never assigned to a user; it exists
-/// only so `dummy_work` can spend one `Argon2id` run (the same cost as a
-/// verification) for an unknown username.
+/// The PIN the dummy hash is made from. Never assigned to a user; it exists
+/// only so `verify_against_dummy_hash` can spend one `Argon2id` verify
+/// (the same cost as a wrong-PIN verify) for an unknown username.
 const DUMMY_PIN: &str = "0000-dummy-pin-never-assigned";
 
 /// Errors from PIN hashing / verification.
@@ -111,16 +111,63 @@ pub fn verify_pin_hash(pin: &str, phc: &str) -> Result<bool, PinError> {
     }
 }
 
-/// Spend one `Argon2id` run (the same cost as a verification) without
-/// checking any credential. Used for unknown usernames so the timing does
-/// not reveal whether the user exists (req. 8).
+/// A dummy PHC hash, computed once on first use, used only to spend one
+/// Argon2id verify for an unknown username (req. 8). The hash is of
+/// `DUMMY_PIN`; the supplied PIN is verified against it and the result is
+/// ignored by the caller (an unknown user always fails with
+/// `InvalidCredentials`, exactly like a wrong PIN).
+/// (`OnceLock::get_or_try_init` is still unstable, so the `Result` is
+/// stored and a failed init is cached as `HashFailed` — the parameters
+/// are fixed, so a failed init cannot succeed on retry.)
+static DUMMY_HASH: std::sync::OnceLock<Result<String, PinError>> = std::sync::OnceLock::new();
+
+/// The dummy hash, computing it once from `DUMMY_PIN` if needed.
 ///
 /// # Errors
+/// Returns [`PinError::HashFailed`] if the dummy hash cannot be built.
+fn dummy_hash() -> Result<&'static str, PinError> {
+    match DUMMY_HASH.get_or_init(|| hash_pin(DUMMY_PIN)) {
+        Ok(hash) => Ok(hash.as_str()),
+        Err(_) => Err(PinError::HashFailed),
+    }
+}
+
+/// Test/diagnostic hook: how many Argon2 verifies have run against the
+/// dummy hash (the unknown-user path). Always compiled — integration tests
+/// link this crate without `cfg(test)`, so a `#[cfg(test)]`-gated counter
+/// would be invisible to them — but only tests read it. One atomic
+/// increment per unknown-user verify, negligible next to the Argon2 run
+/// itself.
+static DUMMY_HASH_VERIFY_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// How many Argon2 verifies have run against the dummy hash (test hook).
+#[must_use]
+pub fn dummy_hash_verify_count() -> usize {
+    DUMMY_HASH_VERIFY_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Reset the dummy-hash verify counter (test hook; call before a
+/// structural assertion so the count is exact).
+pub fn reset_dummy_hash_verify_count() {
+    DUMMY_HASH_VERIFY_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Verify a PIN against the dummy hash (the unknown-user path in
+/// `verify_pin`). Returns the verify result — the caller ignores it (an
+/// unknown user always fails with `InvalidCredentials`). Exactly one
+/// Argon2 verify per call, so the timing does not reveal whether the user
+/// exists.
 ///
-/// Returns [`PinError::HashFailed`] if hashing fails.
-pub fn dummy_work() -> Result<(), PinError> {
-    let _hash = hash_pin(DUMMY_PIN)?;
-    Ok(())
+/// # Errors
+/// Returns [`PinError::HashFailed`] if the dummy hash cannot be built,
+/// [`PinError::InvalidHash`] if the dummy hash is corrupt (it is built by
+/// us, so this cannot happen in practice), and
+/// [`PinError::VerifyFailed`] if the verify itself fails.
+pub(crate) fn verify_against_dummy_hash(pin: &str) -> Result<bool, PinError> {
+    let hash = dummy_hash()?;
+    DUMMY_HASH_VERIFY_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    verify_pin_hash(pin, hash)
 }
 
 #[cfg(test)]
@@ -143,6 +190,23 @@ mod tests {
             verify_pin_hash("1234", "not-a-phc-string"),
             Err(PinError::InvalidHash)
         ));
+    }
+
+    /// The 15x debug speedup from `[profile.dev.package.argon2]`
+    /// opt-level 3 is compiler optimization only: the Argon2 parameters
+    /// are exactly the OWASP minimum (19 MiB memory, 2 iterations,
+    /// 1 lane). Assert on the PRODUCED hash's parameters (not just the
+    /// constants), so a parameter change is caught even if the constants
+    /// are edited.
+    #[test]
+    fn argon2_parameters_are_the_owasp_minimum() {
+        assert_eq!(ARGON2_M_COST_KIB, 19_456);
+        assert_eq!(ARGON2_T_COST, 2);
+        assert_eq!(ARGON2_P_COST, 1);
+        let hash = hash_pin("1234").unwrap();
+        let parsed = PasswordHash::new(&hash).unwrap();
+        assert_eq!(parsed.algorithm.as_str(), "argon2id");
+        assert_eq!(parsed.params.to_string(), "m=19456,t=2,p=1");
     }
 
     /// Measures the `Argon2id` verification time with the OWASP-minimum

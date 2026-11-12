@@ -21,10 +21,12 @@
     clippy::indexing_slicing
 )]
 
+mod common;
+
+use common::{test_root_001b2, unique_test_dir};
 use shopcore_core::draft::{draft_add_line, open_draft, restore_draft};
 use shopcore_core::sale::{
-    CompleteSaleCashInput, FaultInjector, STEP_COMMIT, STEP_SHIFT, STEP_STOCK, TaxMode,
-    complete_sale_cash,
+    CompleteSaleCashInput, FaultInjector, STEP_COMMIT, STEP_SHIFT, STEP_STOCK, complete_sale_cash,
 };
 use shopcore_core::scratch::ScratchDb;
 use shopcore_core::settings::{
@@ -35,7 +37,6 @@ use shopcore_core::users::{create_role, create_user};
 use shopcore_db::Db;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 const NOW: i64 = 1_800_000_000_000;
@@ -48,22 +49,12 @@ const SKU_ID: &str = "sku-milk1l";
 const SKU_PRICE_E4: i64 = 2_500_000;
 const TEST_KEY: &[u8] = b"001b2-test-key-32-bytes-long-abc";
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn unique_dir(label: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/test-tmp-001b2")
-        .join(format!("crash-{label}-{}-{n}", std::process::id()))
-}
-
 /// A minimal till fixture (one SKU, one cashier, one open shift) —
-///
 /// built fresh per crash test so the kill/restart starts from a known
 /// state. The full 7-SKU template lives in `sale.rs`; the crash tests
-/// only need one `SKU` to prove atomicity.
-fn build_fixture(dir: &PathBuf) -> (Db, ScratchDb, String) {
-    std::fs::create_dir_all(dir).unwrap();
+/// only need one `SKU` to prove atomicity. The `dir` is created by the
+/// caller via `common::unique_test_dir`.
+fn build_fixture(dir: &Path) -> (Db, ScratchDb, String) {
     let db = Db::open(dir.join("till.db"), Some(TEST_KEY)).unwrap();
     let cashier_role = create_role(
         &db,
@@ -305,7 +296,6 @@ fn worker_sale_mode(db: &Db, scratch: &ScratchDb, signal: &Path, cashier_id: &st
             tender_minor: 100_000,
             now_ms: NOW,
             date_yyyymmdd: DATE.to_string(),
-            tax_mode: TaxMode::Exclusive,
         },
         Some(&injector),
     );
@@ -371,7 +361,6 @@ fn crash_worker() {
                         tender_minor: 100_000,
                         now_ms: NOW,
                         date_yyyymmdd: DATE.to_string(),
-                        tax_mode: TaxMode::Exclusive,
                     },
                     None,
                 );
@@ -404,7 +393,7 @@ fn crash_worker() {
 /// verify: NO sale was committed (the transaction rolled back),
 /// balances match the ledger, and the draft is restorable.
 fn kill_during_sale_at(step: &'static str) {
-    let dir = unique_dir(&format!("sale-{step}"));
+    let dir = unique_test_dir(&test_root_001b2(), &format!("crash-sale-{step}"));
     let (db, scratch, cashier_id) = build_fixture(&dir);
     // The parent creates the draft + line; the worker only completes it.
     let cart = open_draft(
@@ -503,7 +492,7 @@ fn kill_at_random_point_in_sale_loop() {
     // only COMPLETE sales (never a partial one), balances must match
     // the ledger, and the audit chain must verify.
     for (i, delay_ms) in [200u64, 600, 1200].iter().enumerate() {
-        let dir = unique_dir(&format!("loop-{i}"));
+        let dir = unique_test_dir(&test_root_001b2(), &format!("crash-loop-{i}"));
         let (db, scratch, cashier_id) = build_fixture(&dir);
         drop(db);
         drop(scratch);
@@ -557,7 +546,7 @@ fn kill_during_draft_edit_loses_nothing_committed() {
     // (in practice nothing is lost), no sale exists, and the draft
     // restores whole. The power-cut loss itself is proven only by the
     // manual power-pull test (pre-pilot checklist, owner: user).
-    let dir = unique_dir("draft-edit");
+    let dir = unique_test_dir(&test_root_001b2(), "crash-draft-edit");
     let (db, scratch, cashier_id) = build_fixture(&dir);
     drop(db);
     drop(scratch);

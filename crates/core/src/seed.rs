@@ -60,6 +60,7 @@ pub fn seed_dev_till(db: &Db, tenant_id: &str, now_ms: i64) -> Result<SeedReport
     let price_list_id = uuid::Uuid::now_v7().to_string();
     let tax_group_id = uuid::Uuid::now_v7().to_string();
     let zero_tax_group_id = uuid::Uuid::now_v7().to_string();
+    let inclusive_tax_group_id = uuid::Uuid::now_v7().to_string();
     let uom_each_id = uuid::Uuid::now_v7().to_string();
     let uom_kg_id = uuid::Uuid::now_v7().to_string();
 
@@ -116,6 +117,7 @@ pub fn seed_dev_till(db: &Db, tenant_id: &str, now_ms: i64) -> Result<SeedReport
         let price_list_id = price_list_id.clone();
         let tax_group_id = tax_group_id.clone();
         let zero_tax_group_id = zero_tax_group_id.clone();
+        let inclusive_tax_group_id = inclusive_tax_group_id.clone();
         let uom_each_id = uom_each_id.clone();
         let uom_kg_id = uom_kg_id.clone();
         let tenant_id = tenant_id.to_string();
@@ -148,6 +150,17 @@ pub fn seed_dev_till(db: &Db, tenant_id: &str, now_ms: i64) -> Result<SeedReport
             tx.execute(
                 "INSERT INTO tax_rate (id, tenant_id, tax_group_id, rate_bp, created_at, updated_at, version) VALUES (?1, ?2, ?3, 0, ?4, ?4, 1)",
                 rusqlite::params![uuid::Uuid::now_v7().to_string(), tenant_id, zero_tax_group_id, now_ms],
+            )?;
+            // Inclusive-priced group (price_includes_tax = 1): shelf
+            // prices already include the 18% tax (owner decision
+            // 2026-11-11 — the mode comes from the data).
+            tx.execute(
+                "INSERT INTO tax_group (id, tenant_id, code, name, price_includes_tax, created_at, updated_at, version) VALUES (?1, ?2, 'INC', 'Inclusive 18%', 1, ?3, ?3, 1)",
+                rusqlite::params![inclusive_tax_group_id, tenant_id, now_ms],
+            )?;
+            tx.execute(
+                "INSERT INTO tax_rate (id, tenant_id, tax_group_id, rate_bp, created_at, updated_at, version) VALUES (?1, ?2, ?3, 1800, ?4, ?4, 1)",
+                rusqlite::params![uuid::Uuid::now_v7().to_string(), tenant_id, inclusive_tax_group_id, now_ms],
             )?;
             tx.execute(
                 "INSERT INTO uom (id, tenant_id, code, name, created_at, updated_at, version) VALUES (?1, ?2, 'EA', 'Each', ?3, ?3, 1)",

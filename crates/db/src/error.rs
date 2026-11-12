@@ -11,6 +11,12 @@ pub enum DbError {
     #[error("db actor stopped")]
     ActorStopped,
 
+    /// `Db::shutdown` waited for the actor thread and it did not exit
+    /// in time (it is stuck — the database files must NOT be deleted
+    /// while it is still running).
+    #[error("db actor did not stop on shutdown")]
+    ShutdownTimeout,
+
     /// A migration could not be applied.
     #[error("migration failed: {0}")]
     Migration(String),

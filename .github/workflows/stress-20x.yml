@@ -1,0 +1,88 @@
+name: Teardown stress (20x)
+
+# ADR-036: manual-only job (workflow_dispatch). Runs the sale, pin and
+# crash test binaries 20x each, plus the teardown stress test (2000
+# create/drop cycles of `Db` + `ScratchDb`), on a clean runner. The
+# teardown segfault was a race that only reproduced under parallel
+# load on a clean machine, so CI results are authoritative over the
+# dev VM. Trigger it from the GitHub Actions UI, or with:
+#   gh workflow run stress-20x.yml
+# It does NOT run on push/PR (it is slow: ~15 min per runner).
+on:
+  workflow_dispatch:
+
+jobs:
+  stress-20x:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ADR-022: the vendored OpenSSL build (SQLCipher) runs OpenSSL's
+      # Configure under `perl` from PATH. The Windows runner's default
+      # perl is Git's MSYS2 perl, which lacks core modules and fails
+      # Configure — Strawberry Perl (preinstalled) must come first, and
+      # OPENSSL_SRC_PERL must name it (the build script reads that
+      # variable). Set here (Windows only) via GITHUB_ENV so the later
+      # cargo steps see it; on Linux it is left unset and the system
+      # perl is used.
+      - name: Put Strawberry Perl first on PATH (Windows only)
+        if: runner.os == 'Windows'
+        run: |
+          if (-not (Test-Path "C:\Strawberry\perl\bin\perl.exe")) { throw "Strawberry Perl not found at C:\Strawberry\perl\bin" }
+          Add-Content $env:GITHUB_PATH "C:\Strawberry\perl\bin"
+          Add-Content $env:GITHUB_ENV "OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe"
+          perl -v | Select-Object -First 2
+
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest 0.9.151
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.151
+
+      - name: Install just 1.59.0
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.59.0
+
+      # The 20x loops use `bash` on both runners (windows-latest has
+      # Git Bash), so the same script runs everywhere. Each loop stops
+      # at the first failure (a single flaky run must fail the job,
+      # not be averaged away).
+      - name: Run sale binary 20x
+        shell: bash
+        run: |
+          for i in $(seq 1 20); do
+            cargo nextest run -p shopcore-core --test sale || exit 1
+            echo "sale run $i passed"
+          done
+
+      - name: Run pin binary 20x
+        shell: bash
+        run: |
+          for i in $(seq 1 20); do
+            cargo nextest run -p shopcore-core --test pin || exit 1
+            echo "pin run $i passed"
+          done
+
+      - name: Run crash binary 20x
+        shell: bash
+        run: |
+          for i in $(seq 1 20); do
+            cargo nextest run -p shopcore-core --test crash || exit 1
+            echo "crash run $i passed"
+          done
+
+      - name: Run teardown stress test (2000 cycles)
+        run: just stress

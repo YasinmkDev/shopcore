@@ -75,31 +75,80 @@ fn lockout_after_five_failures_for_five_minutes_then_unlocks() {
     assert_eq!(user.username, "cashier");
 }
 
+/// Unknown-user path: structural correctness + a loose timing sanity
+/// check, in ONE test so the two cannot interleave (both touch the
+/// dummy-hash verify counter, and this binary's tests otherwise run in
+/// parallel — the timing test's dummy verifies would land inside the
+/// structural test's count if they were separate tests; no other test in
+/// this binary uses an unknown username, so the counter is only touched
+/// here).
+///
+/// Structural (correctness — NOT timing): an unknown username runs
+/// exactly one Argon2 verify against the dummy hash and fails with the
+/// SAME error as a wrong PIN. The dummy-hash verify counter (test hook
+/// in `pin.rs`) proves the cost structurally, so this cannot flake under
+/// load.
+///
+/// Timing sanity (loose check only): the unknown-user path must not be
+/// suspiciously faster than a known-wrong PIN, or the timing would
+/// reveal whether the user exists. Median of 15 alternating pairs, so
+/// both paths see the same load; fails only if the unknown-user median
+/// is under 25% of the known-user median. (09: no timing assertions in
+/// `just check` unit tests — this loose sanity check is the one named
+/// exception.)
 #[test]
-fn unknown_username_costs_a_dummy_hash_and_fails_like_a_wrong_pin() {
+fn unknown_username_path_is_structurally_and_temporally_indistinguishable() {
+    use shopcore_core::pin::{dummy_hash_verify_count, reset_dummy_hash_verify_count};
+
+    const PAIRS: usize = 15;
     let db = fresh_db();
     make_user(&db, "cashier", "1234", &["sale.create"]);
-    // Both paths run one Argon2id verification. The unknown path must
-    // not be suspiciously faster than a known-wrong PIN (which would
-    // reveal whether the user exists). Coarse bound: >= 50%.
-    let time_it = |f: &dyn Fn()| {
-        let start = Instant::now();
-        f();
-        start.elapsed()
-    };
-    let known = time_it(&|| {
-        let _ = verify_pin(&db, TENANT, "cashier", "9999", NOW);
-    });
-    let unknown = time_it(&|| {
-        let _ = verify_pin(&db, TENANT, "nobody", "9999", NOW);
-    });
+
+    // --- Structural: exactly one dummy verify per unknown user. ---
+    // A known-wrong PIN does NOT touch the dummy hash: the dummy verify
+    // exists only for unknown usernames.
+    reset_dummy_hash_verify_count();
+    assert!(matches!(
+        verify_pin(&db, TENANT, "cashier", "9999", NOW),
+        Err(PinError::InvalidCredentials)
+    ));
+    assert_eq!(dummy_hash_verify_count(), 0);
+    // An unknown username runs exactly one Argon2 verify against the
+    // dummy hash and fails with the SAME error as a wrong PIN.
     assert!(matches!(
         verify_pin(&db, TENANT, "nobody", "9999", NOW),
         Err(PinError::InvalidCredentials)
     ));
+    assert_eq!(dummy_hash_verify_count(), 1);
+    // A second unknown username costs exactly one more verify.
+    assert!(matches!(
+        verify_pin(&db, TENANT, "someone-else", "9999", NOW),
+        Err(PinError::InvalidCredentials)
+    ));
+    assert_eq!(dummy_hash_verify_count(), 2);
+
+    // --- Timing sanity: median of 15 alternating pairs, 25% floor. ---
+    let mut known: Vec<u128> = Vec::with_capacity(PAIRS);
+    let mut unknown: Vec<u128> = Vec::with_capacity(PAIRS);
+    for _ in 0..PAIRS {
+        // Alternate, so both paths see the same load.
+        let start = Instant::now();
+        let _ = verify_pin(&db, TENANT, "cashier", "9999", NOW);
+        known.push(start.elapsed().as_nanos());
+        let start = Instant::now();
+        let _ = verify_pin(&db, TENANT, "nobody", "9999", NOW);
+        unknown.push(start.elapsed().as_nanos());
+    }
+    known.sort_unstable();
+    unknown.sort_unstable();
+    let known_median = *known.get(PAIRS / 2).expect("15 known timings recorded");
+    let unknown_median = *unknown.get(PAIRS / 2).expect("15 unknown timings recorded");
+    eprintln!(
+        "pin timing sanity: known-wrong median {known_median} ns, unknown-user median {unknown_median} ns over {PAIRS} alternating pairs"
+    );
     assert!(
-        unknown.as_millis() * 2 >= known.as_millis(),
-        "unknown-user verify ({unknown:?}) was less than half the known-wrong-PIN verify ({known:?})"
+        unknown_median * 4 >= known_median,
+        "unknown-user median ({unknown_median} ns) was under 25% of the known-wrong-PIN median ({known_median} ns)"
     );
 }
 

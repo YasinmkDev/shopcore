@@ -24,7 +24,7 @@ Order of operations for each sale line:
 4. Compute tax on the discounted amount per line.
 5. Bill tax = sum of line taxes. Bill total = sum of line totals. No bill-level re-rounding.
 
-Tax modes (per tax group, per tenant default):
+Tax modes (per tax group — `tax_group.price_includes_tax`: 0 = exclusive, 1 = inclusive; the mode comes from the DATA, never a sale-level parameter; a sale's lines may mix modes, each line using its own group's flag):
 - **Exclusive:** `tax = round(net × rate)`, `total = net + tax`.
 - **Inclusive:** `net = round(gross / (1 + rate))`, `tax = gross − net` (so net + tax always equals the shelf price). When a discount applies to an inclusive-tax line, the DISCOUNTED GROSS is the gross for this formula: `net = round(discounted_gross / (1 + rate))`, `tax = discounted_gross − net`.
 

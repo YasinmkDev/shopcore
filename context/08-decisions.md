@@ -106,7 +106,7 @@ The original spec-000 layout put `Cargo.toml` at `crates/desktop/` with `main.rs
 Specs 002–005 use the short format (Goal / In scope / Out of scope / Requirements or Scenarios / Tests / Dependencies / Acceptance / Risks) plus three sections: Data changes, Security/audit, Definition of done. They are NOT converted to the full template in `specs/_template.md`. Why: spikes prove an unknown with mocks and manual checklists; the full template's business-rule and UI sections do not apply yet. Consequence: when a spike graduates to a feature spec (spec 001 uses 003/004), the feature spec uses the full template.
 
 ## ADR-025 — Spec 005: sqlx features dropped to avoid the sqlx-sqlite / rusqlite `links` conflict. Accepted 2026-11-10
-sqlx 0.9.0's `migrate`, `uuid`, and `json` features each pull in `sqlx-sqlite` (verified by bisection in a scratch crate), whose `libsqlite3-sys` (< 0.38.0) conflicts with rusqlite 0.41.1's `libsqlite3-sys` (0.39.x) — both link the native `sqlite3` library, and Cargo forbids two versions of a `links` crate in one resolve. Decision: sqlx runs with `["postgres", "runtime-tokio", "tls-rustls"]` only. Migrations run via `sqlx::raw_sql` (single migration file); UUIDs are bound as text (Postgres casts text → uuid via explicit `::uuid` casts in SQL) and read back via `::text` casts + `Uuid::parse_str`; JSON payloads are bound as text (Postgres casts text → JSONB via `::jsonb`). Consequence: if sqlx ever needs `migrate`/`uuid`/`json`, the conflict must be resolved first (e.g. a rusqlite version whose `libsqlite3-sys` overlaps sqlx-sqlite's range) via a new ADR.
+sqlx 0.9.0's `migrate`, `uuid`, and `json` features each pull in `sqlx-sqlite` (verified by bisection in a scratch crate), whose `libsqlite3-sys` (< 0.38.0) conflicts with rusqlite 0.42.0's `libsqlite3-sys` (0.40.x) — both link the native `sqlite3` library, and Cargo forbids two versions of a `links` crate in one resolve. Decision: sqlx runs with `["postgres", "runtime-tokio", "tls-rustls"]` only. Migrations run via `sqlx::raw_sql` (single migration file); UUIDs are bound as text (Postgres casts text → uuid via explicit `::uuid` casts in SQL) and read back via `::text` casts + `Uuid::parse_str`; JSON payloads are bound as text (Postgres casts text → JSONB via `::jsonb`). Consequence: if sqlx ever needs `migrate`/`uuid`/`json`, the conflict must be resolved first (e.g. a rusqlite version whose `libsqlite3-sys` overlaps sqlx-sqlite's range) via a new ADR.
 
 ## ADR-026 — Sync client is a separate crate, never in the desktop binary. Accepted 2026-11-10
 `crates/sync-client` holds the till-side HTTP client (`reqwest` + `aws-lc-rs`). It is NOT a dependency of `crates/desktop/src-tauri` (verified by `cargo tree -p shopcore-desktop`: no `reqwest`, no `aws-lc-rs`, no `sync-client`). Consequence: the shipped desktop installer size is unchanged by spec 005 (delta 0 — the desktop binary links no sync code; the server and sync-client are separate binaries, not shipped in the installer). `aws-lc-rs` vs `ring`: `aws-lc-rs` is reqwest 0.13's default rustls crypto provider; `ring` would need the `rustls-no-provider` feature plus a manual `CryptoProvider` install, and `ring` is itself native (C/assembly) code — so `ring` buys no pure-Rust advantage, only more wiring. Both are native crypto, neither is OpenSSL. If a pure-Rust TLS provider is ever required, that is a new ADR.
@@ -173,7 +173,7 @@ run for unknown usernames cost one verification each by design. If a
 future target PC measures materially slower, the trade-off (lower memory
 vs longer lockout) is recorded here first — never silently weakened.
 
-## ADR-034 — Draft cart lives in a separate scratch DB; accepted loss window. Accepted 2026-11-11
+## ADR-034 — Draft cart lives in a separate scratch DB; accepted loss window. Accepted 2026-11-11; loss window CORRECTED 2026-11-11 (owner fix)
 The open draft cart (`draft_sale` / `draft_line`) is persisted in a
 SEPARATE scratch DB file with its own connection, `WAL` +
 `synchronous=NORMAL` — never in the main DB, which stays
@@ -183,18 +183,162 @@ cases (`draft_add_line`, `draft_set_qty`, `draft_remove_line`,
 scan path never touches the main DB with a `FULL` flush. The sale
 commit (`complete_sale_cash`) is one transaction on the main DB only.
 
-Accepted loss window: in a power cut, at most the scratch DB's
-unflushed tail can be lost — the cashier re-scans the last line or
-two. A committed sale is NEVER affected: it lives in the main DB
-(`synchronous=FULL`) and is idempotent per `draft_id` (UNIQUE), so a
-second `complete_sale_cash` with the same `draft_id` returns the
-existing sale. A completed draft is TOMBSTONED in the scratch DB and
-restore discards any draft whose sale exists in the main DB, so a late
-scratch-DB flush can never resurrect a completed draft. A process kill
-cannot simulate a power cut (the OS still flushes the file on process
-death) — the crash tests prove ATOMICITY and RECOVERY only; the
-power-cut loss itself is proven by the manual power-pull test, a
-pre-pilot checklist item (owner: user).
+Loss window (CORRECTED): in SQLite WAL mode with
+`synchronous=NORMAL`, commits may be lost back to the LAST
+CHECKPOINT on power loss — so the loss window is NOT "the unflushed
+tail" (~250 ms, as first written). The window is the time from the
+last draft change to the last checkpoint. To bound it, the scratch
+DB runs a CHECKPOINT TIMER on its own thread (`ScratchDb`, 1 s
+interval): every draft write re-arms the timer
+(`with_conn_write` → `mark_changed`), and the timer forces a WAL
+checkpoint (`PRAGMA wal_checkpoint(TRUNCATE)`) about 1 s after the
+draft last changed. The scan path never waits on it — a draft write
+only notifies the timer thread; the checkpoint itself runs on the
+timer thread. MEASURED bound (2026-11-11, dev VM, 4 writer threads
+hammering the scratch DB): **1.03 s** from the last draft change to
+the checkpoint completing (`crates/core/tests/scratch.rs`,
+`checkpoint_timer_bound_under_load`). So in a power cut, at most
+~1 s of draft changes can be lost — the cashier re-scans the last
+line or two. A committed sale is NEVER affected: it lives in the
+main DB (`synchronous=FULL`) and is idempotent per `draft_id`
+(UNIQUE), so a second `complete_sale_cash` with the same `draft_id`
+returns the existing sale. A completed draft is TOMBSTONED in the
+scratch DB and restore discards any draft whose sale exists in the
+main DB, so a late scratch-DB flush can never resurrect a completed
+draft. A process kill cannot simulate a power cut (the OS still
+flushes the file on process death) — the crash tests prove ATOMICITY
+and RECOVERY only; the power-cut loss itself is proven by the manual
+power-pull test, a pre-pilot checklist item (owner: user).
+
+## ADR-035 — Test template-dir cleanup: stale-cleanup only, no `atexit`. Accepted 2026-11-12 (owner fix for the template-dir collision)
+
+The sale-test template DB is built once per test binary (`OnceLock`)
+and copied per test. Its dir was named `{label}-{pid}-{n}` under a
+never-cleaned `target/test-tmp-*/` root; PID reuse across runs let a
+new test process reopen a leftover template DB, and the role seeding
+failed with `UNIQUE constraint failed: role.tenant_id, role.name`
+(2026-11-11, `just check` run 2 of the 5x loop). The fix, in
+`crates/core/tests/common/mod.rs` (`unique_test_dir`, shared by the
+sale/crash/scratch test binaries): the dir name is
+`{label}-{pid}-{uuidv7}` (PID + a random UUIDv7 — unique per process
+AND per dir), created with `create_dir` (never `create_dir_all`) so a
+collision fails loudly instead of silently reusing a stale dir, and
+stale subdirs older than 1 hour are removed at startup (a
+concurrently-running test process only has fresh dirs, so it is never
+touched). Per-test dirs are removed by `Drop` (sale `Fixture`,
+scratch `DirGuard`) or an explicit removal (crash tests).
+
+A process-exit hook (`atexit`) for the template dir was CONSIDERED
+and REJECTED: it needs `unsafe`, and the workspace forbids `unsafe`
+code (`unsafe_code = "forbid"`, root `Cargo.toml`). Relaxing that
+lint for a test fixture was not done. The template dir is therefore
+removed by the 1-hour stale-cleanup on a later run, which bounds the
+accumulation to ~1 hour of runs (not the 346 dirs that accumulated
+before the fix); `just clean-test-tmp` removes everything on demand.
+If the owner later wants the literal process-exit deletion, the
+change is: workspace lint `forbid` -> `deny` + a scoped
+`#[allow(unsafe_code)]` on the test helper + an ADR for the `unsafe`
+— not a silent relaxation.
+
+## ADR-036 — Graceful shutdown: join the DB actor and scratch timer threads before deleting the database files. Accepted 2026-11-12 (owner fix for the teardown segfault)
+
+A SIGSEGV (signal 11) hit the sale test binary (2026-11-11, 20x
+loop run 9, `draft_add_same_sku_same_price_increments`) and the
+crash test binary (2026-11-12, load run 4,
+`kill_during_sale_shift_is_atomic`): in both cases the test itself
+PASSED and the process then crashed during teardown. The pin binary
+(plaintext in-memory DB, no WAL file) never crashed (20/20).
+Reproduction under `gdb` never crashed (25 runs) — the debugger
+serialises the threads and suppresses the race; core dumps are
+unavailable in this container (hard limit 0, read-only
+`core_pattern`), so no backtrace was captured. The cause was found
+by reading the teardown code, not by a backtrace.
+
+Root cause: the `Db` actor thread and the `ScratchDb` checkpoint
+timer thread were DETACHED (spawned, join handle discarded, never
+joined). The sale `Fixture::drop` removed the test directory
+(`remove_dir_all`) BEFORE the `Db`/`ScratchDb` fields were dropped
+(`Drop::drop` runs before field drops), and the crash tests dropped
+the handles but never joined the threads — so the database files
+(including the WAL `-shm` file, which SQLite memory-maps) were
+deleted while a background thread was still closing its connection
+(`sqlite3_close`) or checkpointing. Accessing the deleted /
+memory-mapped files from the still-running thread segfaults.
+
+Fix: `Db` and `ScratchDb` now have an explicit graceful shutdown
+(`Db::shutdown`, `ScratchDb::shutdown`) — close the command channel
+(`Db`) / signal the timer (`ScratchDb`), JOIN the thread with a
+5 s timeout, flush the scratch DB (final WAL checkpoint), close
+the connections explicitly — and `Drop` calls the same path
+(`DbInner::drop`, `ScratchDb::drop`). The join handle is kept in
+the inner (`Mutex<Option<JoinHandle>>`) so `shutdown` can take it
+from `&self`. A join timeout is an error (`DbError::ShutdownTimeout`,
+`CoreError::ShutdownTimeout`): the caller must NOT delete the files
+while a thread is stuck. Test fixtures shut the DBs down BEFORE
+removing the directory (sale `Fixture::drop` calls both
+`shutdown`s explicitly; the crash tests' explicit `drop(db)` /
+`drop(scratch)` now join via `Drop`). A stress test
+(`crates/core/tests/shutdown.rs`) creates and drops `Db` +
+`ScratchDb` thousands of times in parallel and asserts clean
+joins. `Core::shutdown` (decision 2026-11-12) is the app-level
+entry point: the Tauri exit event must call it before the process
+exits (added to the 001c-1 requirements and the tracker).
+
+`verify_audit_chain` today re-reads and re-hashes the whole chain
+from genesis on every run. That is fine for one terminal's short
+history, but it does not scale: a future spec must make verification
+incremental — remember the last verified hash (and row count) and
+verify only the rows appended since, re-verifying from genesis only
+when the remembered hash does not match. NOT built now; the note is
+here so the next audit spec does not re-litigate it.
+
+## ADR-037 — Bump rusqlite / libsqlite3-sys / sqlcipher-src for RUSTSEC-2026-0502 (CVE-2026-119375). Accepted 2026-11-12 (owner decision)
+
+`cargo deny` (2026-11-12) failed on a new advisory:
+RUSTSEC-2026-0502 / CVE-2026-119375 — a WAL-read vulnerability in
+`sqlcipher-src` 419.0.6 (SQLCipher 4.19.0 on SQLite 3.53.4):
+`sqlite3WalReadFrame` is exposed when a process opens a database
+file (with its `-wal`) that a less trusted party could have written.
+The fix is sqlcipher-src >= 420.0.0 (SQLCipher 4.20.0 on SQLite
+3.54.1). No deny exception was granted (owner decision).
+
+Old versions: rusqlite 0.41.1, libsqlite3-sys 0.39.1, sqlcipher-src
+419.0.6 (SQLCipher 4.19.0 / SQLite 3.53.4). New versions: rusqlite
+0.42.0, libsqlite3-sys 0.40.0, sqlcipher-src 420.0.0 (SQLCipher
+4.20.0 / SQLite 3.54.1). Also bumped: transitive sqlite-wasm-rs
+0.6.2 -> 0.6.3.
+
+The bump could NOT be done with `cargo update -p sqlcipher-src`
+alone: libsqlite3-sys 0.39.1 pins `sqlcipher-src = "=419.0.6"`
+(exact), and rusqlite 0.41.1 depends on libsqlite3-sys 0.39.1, so
+the fix required the rusqlite 0.42.0 + libsqlite3-sys 0.40.0 bump
+(owner-approved, in its own commit, separately revertable).
+libsqlite3-sys 0.40.0 pins `sqlcipher-src = "=420.0.0"`. Both new
+crates are MIT, rust-version 1.89.0 / 1.88.0 (toolchain 1.99.1),
+and the `bundled-sqlcipher-vendored-openssl` feature still exists
+in both.
+
+The rusqlite 0.42.0 changelog (release 2026-11-11) has NO breaking
+change touching our code: the renamed `Error` variants
+(`InvalidFunctionParameterType` / `InvalidFilterParameterType` ->
+`InvalidParameterType`) and the removed PRAGMA-name check for
+SQLCipher builds are in code paths we do not use (we never match
+on those variants; we issue raw SQL `PRAGMA ...` via
+`execute_batch`, not `pragma()`/`pragma_update()`). We do not use
+`Session`, `VTab`, or custom scalar functions. No DB code was
+rewritten; the bump is Cargo.toml + Cargo.lock only.
+
+Backward compatibility proven: a fixture DB created by the OLD
+build (`crates/db/tests/fixtures/sqlcipher-419-compat.db`, 430 KB,
+encrypted with the test key, real migrations, one marker row) is
+opened by the new build with the same key and the marker read back
+(`crates/db/tests/compat_419.rs`, `old_db_opens_with_same_key`).
+Also proven on the new build: `cargo deny check` green (no
+exception), `cargo tree -i sqlcipher-src` shows 420.0.0, the FTS5
+gate test, and the SQLCipher key round-trip. Consequence: the
+`bundled-sqlcipher-vendored-openssl` feature and the vendored
+OpenSSL build (ADR-022) are unchanged; the Windows CI job must
+still build and pass with vendored OpenSSL.
 
 ## ADR-009 assessment (spec 005, 2026-11-10) — KEEP
 The spike's 12 chaos tests all pass against a real Postgres (local) — duplicate delivery, out-of-order batches, connection drop, server restart, clock skew, two tills selling the last unit, upgrade with unsent outbox, snapshot interrupt/resume, full-history replay (byte-identical, unique constraint proven to fire), per-field LWW merge, gap detector, revalidation stub. No chaos test exposed a protocol design flaw, so the stop condition did not trigger. ADR-009 (custom outbox/inbox sync, not generic CRDT) is KEPT for Phase 5. Two notes for Phase 5: (1) the per-tenant sequence lock serializes batches per tenant — under high concurrency this is a throughput ceiling to measure; (2) the snapshot catalog is the set of SKUs the server has seen (via movements/price entries), not the full 500k-SKU catalog — the full-catalog snapshot is the manual target-PC run.
