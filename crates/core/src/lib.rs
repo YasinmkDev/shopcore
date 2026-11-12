@@ -12,6 +12,7 @@
 //! permissions, settings, and the dev seed.
 
 pub mod audit;
+pub mod cart;
 pub mod core;
 pub mod draft;
 pub mod error;
@@ -23,9 +24,12 @@ pub mod search;
 #[cfg(feature = "dev-seed")]
 pub mod seed;
 pub mod settings;
+pub mod shift;
+pub mod tax;
 pub mod users;
 
 pub use audit::{AuditEvent, verify_audit_chain};
+pub use cart::{PricedCart, PricedCartLine, price_draft_cart};
 pub use core::Core;
 pub use draft::{DraftCart, DraftLine};
 pub use error::CoreError;

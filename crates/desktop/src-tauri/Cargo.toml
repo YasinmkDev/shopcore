@@ -14,12 +14,26 @@ path = "src/main.rs"
 [dependencies]
 tauri = { workspace = true }
 tokio = { workspace = true }
+rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 shopcore-core = { workspace = true }
+shopcore-db = { path = "../../db", version = "0.1.0" }
+shopcore-hardware = { path = "../../hardware", version = "0.1.0" }
 shopcore-protocol = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }
+
+[features]
+# Dev auto-session (spec 001c-1, amendment 4): fills the SessionProvider
+# in dev from the dev seed. Enables `shopcore-core/dev-seed`, so this
+# feature must NEVER be enabled in a release build — CI greps the
+# release binary for the seed marker (see .github/workflows/ci.yml).
+# `just dev` enables it; `just build` does not.
+dev-session = ["shopcore-core/dev-seed"]
 
 [build-dependencies]
 # Standard layout since 2026-11-10: Cargo.toml sits in src-tauri/ next to

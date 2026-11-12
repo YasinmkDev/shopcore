@@ -6,6 +6,10 @@ use crate::search::SearchError;
 /// Errors from the core use cases.
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
+    /// A domain error (pricing, tax, cash, receipt).
+    #[error("domain error: {0}")]
+    Domain(#[from] shopcore_domain::DomainError),
+
     /// A database error (actor, migration, or query).
     #[error("database error: {0}")]
     Db(#[from] shopcore_db::DbError),

@@ -3611,15 +3611,19 @@ dependencies = [
 name = "shopcore-desktop"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
  "shopcore-core",
+ "shopcore-db",
+ "shopcore-hardware",
  "shopcore-protocol",
  "tauri",
  "tauri-build",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

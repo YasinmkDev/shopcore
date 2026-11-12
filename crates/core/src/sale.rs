@@ -14,7 +14,7 @@
 //! Tax mode: the mode comes from the DATA — each line's tax group
 //! carries `price_includes_tax` (0 = exclusive, 1 = inclusive), so a
 //! sale's lines may mix modes and each line uses its own group's flag
-//! ([`tax_spec_for_group`]). There is no sale-level mode parameter and
+//! ([`crate::tax::tax_spec_for_group`]). There is no sale-level mode parameter and
 //! no tenant default (owner decision 2026-11-11).
 //!
 //! Timestamps: epoch-ms integers + the `now_ms` helper, consistent
@@ -34,8 +34,8 @@ use std::fmt::Write;
 use rusqlite::{OptionalExtension, Transaction};
 use shopcore_db::Db;
 use shopcore_domain::{
-    BillDiscount, CartResult, CashRounding, LineDiscount, LineInput, Money, Qty, Rate, TaxSpec,
-    UnitPrice, compute_change, next_receipt_number, price_cart,
+    BillDiscount, CartResult, CashRounding, LineDiscount, LineInput, Money, Qty, UnitPrice,
+    compute_change, next_receipt_number, price_cart,
 };
 use shopcore_hardware::{
     CashDrawer, HardwareError, PrintDoc, PrintLine, PrintPayment, ReceiptPrinter,
@@ -50,6 +50,7 @@ use crate::settings::{
     KEY_CASH_ROUNDING_GRANULARITY_MINOR, KEY_TENANT_CURRENCY_EXPONENT, SCOPE_TENANT,
     get_setting_i64,
 };
+use crate::tax::tax_spec_for_group;
 use crate::users::get_role;
 
 /// Errors from the sale use cases. Each maps to a stable code via
@@ -380,84 +381,6 @@ pub fn negative_stock_skus(
         }
         Ok(out)
     })?)
-}
-
-/// Build a line's [`TaxSpec`] from its tax group, plus the
-/// `(tax_rate_id, rate_bp)` pairs (in group order) for the
-/// `sale_line_tax` rows. Rates are ordered by creation
-/// (`created_at, id` — `UUIDv7` ids are time-ordered, so the id breaks
-/// same-millisecond ties in creation order).
-///
-/// Rules: a `SKU` with NO tax group is an error (the catalog is
-/// incomplete — tax cannot be computed without a group, and a
-/// `sale_line_tax` row needs a `tax_rate_id`). A group with NO rate
-/// rows, or with ALL rates zero, is exempt (no `sale_line_tax` rows).
-/// Otherwise the rates apply per the group's `price_includes_tax`
-/// flag (0 = exclusive, 1 = inclusive) — the mode comes from the
-/// data, so a sale's lines may mix modes.
-///
-/// # Errors
-///
-/// Returns [`SaleError::InvalidInput`] when the `SKU` has no tax group
-/// or a rate is out of range, and [`SaleError::Db`] if the read fails.
-pub fn tax_spec_for_group(
-    tx: &Transaction<'_>,
-    tenant_id: &str,
-    tax_group_id: Option<&str>,
-) -> Result<(TaxSpec, Vec<(String, i64)>), SaleError> {
-    let Some(group_id) = tax_group_id else {
-        return Err(SaleError::InvalidInput(
-            "SKU has no tax group; tax cannot be computed".to_string(),
-        ));
-    };
-    // The mode comes from the data (owner decision 2026-11-11): a
-    // missing group row reads as exclusive (the column defaults to 0).
-    let price_includes_tax: i64 = tx
-        .query_row(
-            "SELECT price_includes_tax FROM tax_group WHERE tenant_id = ?1 AND id = ?2 AND deleted_at IS NULL",
-            rusqlite::params![tenant_id, group_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or(0);
-    let mut stmt = tx.prepare(
-        "SELECT id, rate_bp FROM tax_rate WHERE tenant_id = ?1 AND tax_group_id = ?2 AND deleted_at IS NULL ORDER BY created_at, id",
-    )?;
-    let rows = stmt.query_map(rusqlite::params![tenant_id, group_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?;
-    let mut pairs: Vec<(String, i64)> = Vec::new();
-    for row in rows {
-        pairs.push(row?);
-    }
-    if pairs.is_empty() {
-        return Ok((
-            TaxSpec::Exempt {
-                reason: "no tax rates configured for group".to_string(),
-            },
-            Vec::new(),
-        ));
-    }
-    if pairs.iter().all(|(_, bp)| *bp == 0) {
-        return Ok((
-            TaxSpec::Exempt {
-                reason: "zero-rated".to_string(),
-            },
-            Vec::new(),
-        ));
-    }
-    let mut rates: Vec<Rate> = Vec::with_capacity(pairs.len());
-    for (_, bp) in &pairs {
-        let bp_u32 = u32::try_from(*bp)
-            .map_err(|_| SaleError::InvalidInput(format!("tax rate {bp} bp is out of range")))?;
-        rates.push(Rate::from_basis_points(bp_u32).map_err(SaleError::Domain)?);
-    }
-    let spec = if price_includes_tax != 0 {
-        TaxSpec::Inclusive { rates }
-    } else {
-        TaxSpec::Exclusive { rates }
-    };
-    Ok((spec, pairs))
 }
 
 /// One priced line, with the `SKU` name and tax-rate pairs the sale
