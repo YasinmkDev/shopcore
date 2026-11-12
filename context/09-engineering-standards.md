@@ -17,6 +17,7 @@
 - `unsafe` is forbidden without an ADR.
 - Public API of each crate is small and documented; modules are private by default.
 - Tests: unit tests next to code, property tests (`proptest`) for domain invariants, integration tests in `tests/`. Use `cargo nextest`.
+- No timing assertions in `just check` unit tests. Timing is load-sensitive and flakes under parallel load (hit 2026-11-11: the pin unknown-user timing test flaked after `[profile.dev.package.argon2]` opt-level 3 made the debug verify ~15x faster, so a 50% ratio assertion saw 28.6 ms vs 118.1 ms). Timing lives in `just bench`; correctness is tested structurally (e.g. a test-only counter proving the unknown-user path runs exactly one Argon2 verify against the dummy hash). The one named exception is the pin unknown-user timing *sanity* check (median of >= 15 alternating pairs, fails only under 25%) — a loose sanity check, not a correctness assertion — and it lives in the same test as the structural check so the two cannot interleave.
 
 ### Pattern: money type (illustrative, finalize in code)
 ```rust

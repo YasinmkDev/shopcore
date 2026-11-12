@@ -13,7 +13,7 @@ use rusqlite::OptionalExtension;
 use shopcore_db::Db;
 
 use crate::CoreError;
-use crate::pin::{PinError, dummy_work, hash_pin, verify_pin_hash};
+use crate::pin::{PinError, hash_pin, verify_against_dummy_hash, verify_pin_hash};
 use crate::settings::{
     DEFAULT_PIN_LOCKOUT_DURATION_MINUTES, DEFAULT_PIN_LOCKOUT_MAX_FAILURES,
     KEY_PIN_LOCKOUT_DURATION_MINUTES, KEY_PIN_LOCKOUT_MAX_FAILURES, SCOPE_TENANT, get_setting_i64,
@@ -233,8 +233,9 @@ pub fn get_role(db: &Db, tenant_id: &str, role_id: &str) -> Result<Option<Role>,
 /// `security.pin_lockout.max_failures` failures (default 5) the user is
 /// locked out for `security.pin_lockout.duration_minutes` (default 5) and
 /// the error carries the [`PinLockoutEvent`]. An unknown username costs
-/// one `Argon2id` run (`dummy_work`) and fails exactly like a wrong PIN,
-/// so the timing does not reveal whether the user exists.
+/// one `Argon2id` verify against the dummy hash
+/// (`verify_against_dummy_hash`) and fails exactly like a wrong PIN, so
+/// the timing does not reveal whether the user exists.
 ///
 /// `now_ms` is the injected clock (epoch ms) — the caller supplies it so
 /// the lockout is testable without waiting.
@@ -253,9 +254,11 @@ pub fn verify_pin(
     now_ms: i64,
 ) -> Result<User, PinError> {
     let Some((user, pin_hash)) = load_user_row(db, tenant_id, username)? else {
-        // Unknown username: spend one Argon2id run, then fail exactly
-        // like a wrong PIN (no user enumeration via timing or error).
-        dummy_work()?;
+        // Unknown username: spend one Argon2id verify against the dummy
+        // hash, then fail exactly like a wrong PIN (no user enumeration
+        // via timing or error). The verify result is ignored — the dummy
+        // PIN is never assigned to a user.
+        let _ = verify_against_dummy_hash(pin)?;
         return Err(PinError::InvalidCredentials);
     };
     if let Some(until) = user.locked_until_ms
