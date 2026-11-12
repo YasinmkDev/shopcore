@@ -1,7 +1,14 @@
-//! SQLCipher backward-compatibility: a database file written by the old
-//! build (rusqlite 0.41.1 / sqlcipher-src 419.0.6, SQLCipher 4.19.0) must
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+
+//! `SQLCipher` backward-compatibility: a database file written by the old
+//! build (rusqlite 0.41.1 / sqlcipher-src 419.0.6, `SQLCipher` 4.19.0) must
 //! still open with the same key under the new build (rusqlite 0.42.0 /
-//! sqlcipher-src 420.0.0, SQLCipher 4.20.0). The fixture
+//! sqlcipher-src 420.0.0, `SQLCipher` 4.20.0). The fixture
 //! `tests/fixtures/sqlcipher-419-compat.db` was created by the old build
 //! (see `examples/make_419_fixture.rs`, since deleted); it contains one
 //! marker row in `settings` (`sqlcipher-419-compat` = `sqlcipher-419-ok`).
