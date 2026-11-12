@@ -119,8 +119,7 @@ pub fn verify_pin_hash(pin: &str, phc: &str) -> Result<bool, PinError> {
 /// (`OnceLock::get_or_try_init` is still unstable, so the `Result` is
 /// stored and a failed init is cached as `HashFailed` — the parameters
 /// are fixed, so a failed init cannot succeed on retry.)
-static DUMMY_HASH: std::sync::OnceLock<Result<String, PinError>> =
-    std::sync::OnceLock::new();
+static DUMMY_HASH: std::sync::OnceLock<Result<String, PinError>> = std::sync::OnceLock::new();
 
 /// The dummy hash, computing it once from `DUMMY_PIN` if needed.
 ///
