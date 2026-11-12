@@ -117,3 +117,10 @@ clean-test-tmp:
 # what is missing. Read-only; changes nothing. Linux dev machine only.
 doctor:
     bash scripts/doctor.sh
+
+# Run the teardown stress test (ADR-036): 2000 create/drop cycles of
+# `Db` + `ScratchDb` in parallel, asserting clean joins. Slow (~6 min)
+# — that is why it is `#[ignore]`d out of `just check`; run it here
+# and in the CI 20x job.
+stress:
+    cargo nextest run -p shopcore-core --test shutdown -- --ignored

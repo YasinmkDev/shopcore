@@ -26,6 +26,12 @@ pub enum CoreError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
 
+    /// A background thread (the scratch DB's checkpoint timer) did not
+    /// stop on shutdown within the timeout (it is stuck — the scratch
+    /// database files must NOT be deleted while it is still running).
+    #[error("background thread did not stop on shutdown")]
+    ShutdownTimeout,
+
     /// The audit hash chain is broken at this row (a field was changed
     /// after writing, or the `prev_hash` link does not match the
     /// previous row). Reported by the verify use case, never silently

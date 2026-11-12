@@ -239,6 +239,51 @@ If the owner later wants the literal process-exit deletion, the
 change is: workspace lint `forbid` -> `deny` + a scoped
 `#[allow(unsafe_code)]` on the test helper + an ADR for the `unsafe`
 — not a silent relaxation.
+
+## ADR-036 — Graceful shutdown: join the DB actor and scratch timer threads before deleting the database files. Accepted 2026-11-12 (owner fix for the teardown segfault)
+
+A SIGSEGV (signal 11) hit the sale test binary (2026-11-11, 20x
+loop run 9, `draft_add_same_sku_same_price_increments`) and the
+crash test binary (2026-11-12, load run 4,
+`kill_during_sale_shift_is_atomic`): in both cases the test itself
+PASSED and the process then crashed during teardown. The pin binary
+(plaintext in-memory DB, no WAL file) never crashed (20/20).
+Reproduction under `gdb` never crashed (25 runs) — the debugger
+serialises the threads and suppresses the race; core dumps are
+unavailable in this container (hard limit 0, read-only
+`core_pattern`), so no backtrace was captured. The cause was found
+by reading the teardown code, not by a backtrace.
+
+Root cause: the `Db` actor thread and the `ScratchDb` checkpoint
+timer thread were DETACHED (spawned, join handle discarded, never
+joined). The sale `Fixture::drop` removed the test directory
+(`remove_dir_all`) BEFORE the `Db`/`ScratchDb` fields were dropped
+(`Drop::drop` runs before field drops), and the crash tests dropped
+the handles but never joined the threads — so the database files
+(including the WAL `-shm` file, which SQLite memory-maps) were
+deleted while a background thread was still closing its connection
+(`sqlite3_close`) or checkpointing. Accessing the deleted /
+memory-mapped files from the still-running thread segfaults.
+
+Fix: `Db` and `ScratchDb` now have an explicit graceful shutdown
+(`Db::shutdown`, `ScratchDb::shutdown`) — close the command channel
+(`Db`) / signal the timer (`ScratchDb`), JOIN the thread with a
+5 s timeout, flush the scratch DB (final WAL checkpoint), close
+the connections explicitly — and `Drop` calls the same path
+(`DbInner::drop`, `ScratchDb::drop`). The join handle is kept in
+the inner (`Mutex<Option<JoinHandle>>`) so `shutdown` can take it
+from `&self`. A join timeout is an error (`DbError::ShutdownTimeout`,
+`CoreError::ShutdownTimeout`): the caller must NOT delete the files
+while a thread is stuck. Test fixtures shut the DBs down BEFORE
+removing the directory (sale `Fixture::drop` calls both
+`shutdown`s explicitly; the crash tests' explicit `drop(db)` /
+`drop(scratch)` now join via `Drop`). A stress test
+(`crates/core/tests/shutdown.rs`) creates and drops `Db` +
+`ScratchDb` thousands of times in parallel and asserts clean
+joins. `Core::shutdown` (decision 2026-11-12) is the app-level
+entry point: the Tauri exit event must call it before the process
+exits (added to the 001c-1 requirements and the tracker).
+
 `verify_audit_chain` today re-reads and re-hashes the whole chain
 from genesis on every run. That is fine for one terminal's short
 history, but it does not scale: a future spec must make verification

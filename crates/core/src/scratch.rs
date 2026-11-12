@@ -153,7 +153,19 @@ pub struct ScratchDb {
     /// Completed WAL checkpoints since this scratch DB was opened
     /// (test hook — see [`ScratchDb::checkpoints_completed`]).
     checkpoints: Arc<AtomicU64>,
+    /// The checkpoint timer thread's join handle. `None` after it has
+    /// been joined. Behind a `Mutex` so [`ScratchDb::shutdown`] can
+    /// take it from `&self`. Joined on shutdown so no detached thread
+    /// outlives the `ScratchDb` (a detached timer thread that is still
+    /// checkpointing while the scratch files are deleted segfaults —
+    /// the WAL `-shm` file is memory-mapped; see ADR-036).
+    timer_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
+
+/// How long [`ScratchDb::shutdown`] waits for the checkpoint timer
+/// thread to exit before giving up (the thread only has to wake, see
+/// the shutdown flag, and return, so this should never be hit).
+const SCRATCH_SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl ScratchDb {
     /// Open (or create) the scratch database at `path`. Sets `WAL` +
@@ -196,25 +208,73 @@ impl ScratchDb {
         let checkpoints = Arc::new(AtomicU64::new(0));
         // The checkpoint timer thread (ADR-034): forces a WAL
         // checkpoint one interval after the draft last changed, off
-        // the scan path. Detached — `Drop` signals shutdown and the
-        // thread exits on its own (it holds only `Arc` clones, so
-        // nothing is left behind). Same spawn pattern as the `DB`
-        // actor thread.
-        {
+        // the scan path. The thread's join handle is kept so
+        // `shutdown` (and `Drop`) can join it — the thread must be
+        // joined, never detached, before the scratch files are
+        // deleted (ADR-036).
+        let timer_handle = {
             let timer = CheckpointTimer {
                 conn: Arc::clone(&conn),
                 state: Arc::clone(&checkpoint_state),
                 interval,
                 checkpoints: Arc::clone(&checkpoints),
             };
-            std::thread::spawn(move || checkpoint_timer(timer));
-        }
+            std::thread::spawn(move || checkpoint_timer(timer))
+        };
         Ok(Self {
             conn,
             path,
             checkpoint_state,
             checkpoints,
+            timer_handle: Mutex::new(Some(timer_handle)),
         })
+    }
+
+    /// Gracefully shut the checkpoint timer thread down and flush the
+    /// scratch DB: signal the timer thread to exit, join it (with a
+    /// timeout), then force a final WAL checkpoint so every draft
+    /// write is durable in the main file. Idempotent — a second call
+    /// is a no-op. After this returns `Ok`, no thread is still using
+    /// the scratch files, so the caller may delete them.
+    ///
+    /// Call this before deleting the scratch database files, and call
+    /// it from the app's exit path (see `Core::shutdown`). Never call
+    /// it from the timer thread itself (it would deadlock joining
+    /// itself).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::ShutdownTimeout`] if the timer thread did
+    /// not exit within the timeout (it is stuck — do NOT delete the
+    /// files).
+    pub fn shutdown(&self) -> Result<(), CoreError> {
+        // Signal the timer thread to exit first (it wakes from the
+        // condvar, sees the flag, and returns).
+        self.checkpoint_state.shutdown();
+        // Join the timer thread. `is_finished` is polled so the wait
+        // is bounded.
+        let handle = self
+            .timer_handle
+            .lock()
+            .map_err(|_| CoreError::InvalidInput("timer handle lock poisoned".to_string()))?
+            .take();
+        if let Some(handle) = handle {
+            let deadline = std::time::Instant::now() + SCRATCH_SHUTDOWN_JOIN_TIMEOUT;
+            while !handle.is_finished() {
+                if std::time::Instant::now() >= deadline {
+                    return Err(CoreError::ShutdownTimeout);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            handle.join().map_err(|_| {
+                CoreError::InvalidInput("checkpoint timer thread panicked".to_string())
+            })?;
+        }
+        // Flush: force a final WAL checkpoint now that no thread is
+        // racing the connection, so the scratch DB is fully durable
+        // before the caller deletes (or keeps) the files.
+        let _ = run_checkpoint(&self.conn);
+        Ok(())
     }
 
     /// Mark the draft changed (call after a successful draft write):
@@ -314,9 +374,12 @@ impl ScratchDb {
 
 impl Drop for ScratchDb {
     fn drop(&mut self) {
-        // Signal the timer thread to exit; it holds only `Arc`
-        // clones and exits on its own (no join needed).
-        self.checkpoint_state.shutdown();
+        // Best-effort graceful shutdown (same path as `shutdown`):
+        // signal the timer thread, join it, flush the WAL. A failure
+        // here (stuck timer) cannot be reported from `Drop`, but the
+        // explicit `shutdown` call — which the app and the tests use
+        // before deleting the files — does report it.
+        let _ = self.shutdown();
     }
 }
 

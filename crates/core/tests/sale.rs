@@ -664,8 +664,16 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        // Best-effort cleanup (works on Linux even with the DBs open;
-        // on Windows the files may linger under `target/`, harmless).
+        // Shut the DBs down FIRST (join their threads, close the
+        // connections) — only then delete the directory. `Drop::drop`
+        // runs BEFORE the fields are dropped, so the shutdown must be
+        // explicit here: deleting the files while the actor/timer
+        // threads are still running segfaults (the WAL `-shm` file is
+        // memory-mapped; ADR-036). Best-effort: a stuck thread is
+        // reported by the explicit `shutdown` callers and the stress
+        // test, not by panicking in `Drop`.
+        let _ = self.db.shutdown();
+        let _ = self.scratch.shutdown();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
