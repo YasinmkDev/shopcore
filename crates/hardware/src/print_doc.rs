@@ -20,8 +20,17 @@ pub struct PrintDoc {
     pub header: Vec<String>,
     /// The sold lines.
     pub lines: Vec<PrintLine>,
-    /// Subtotal, minor units (after discounts, before tax).
+    /// Subtotal, minor units: sum of line grosses (shelf prices,
+    /// before discounts and tax). For inclusive lines the gross
+    /// already contains the tax, so this figure does NOT satisfy
+    /// `subtotal - discounts + tax == total` — use
+    /// `net_subtotal_minor` for that equation (see 02).
     pub subtotal_minor: i64,
+    /// Net subtotal, minor units: sum of line nets after line
+    /// discounts and bill-discount allocation (the domain's bill
+    /// net). `net_subtotal + tax == total` in every tax mode
+    /// (exclusive, inclusive, mixed).
+    pub net_subtotal_minor: i64,
     /// Total tax, minor units.
     pub tax_minor: i64,
     /// Grand total, minor units.
@@ -44,7 +53,7 @@ pub struct PrintLine {
     pub qty_milli: i64,
     /// Unit price at scale 10^4.
     pub unit_price_e4: i64,
-    /// Line total, minor units (after line discount, before tax).
+    /// Line total, minor units (`net + tax`).
     pub line_total_minor: i64,
 }
 
@@ -73,6 +82,7 @@ mod tests {
                 line_total_minor: 250,
             }],
             subtotal_minor: 250,
+            net_subtotal_minor: 250,
             tax_minor: 0,
             total_minor: 250,
             payments: vec![PrintPayment {

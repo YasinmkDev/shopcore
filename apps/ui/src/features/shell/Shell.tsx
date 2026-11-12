@@ -1,17 +1,20 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactElement } from "react";
 import { t } from "@shopcore/i18n";
 import { Button, StatusPill } from "@shopcore/ui-kit";
 import type { ThemeSetting } from "@shopcore/ui-kit";
 import { useTheme } from "../../lib/theme";
 import type { CoreClient } from "../../lib/core-client";
+import { SessionProvider } from "../checkout/SessionProvider";
+import { SellScreen } from "../checkout/SellScreen";
 
 /**
- * Scaffold shell (spec 000): white-theme window with a StatusPill and a
- * Ping button proving the UI → Rust round-trip. No business logic.
+ * Shell (spec 000 + 001c-1): window chrome (title, theme control,
+ * online pill) around the sell screen. The online pill is driven by
+ * a ping on mount — that also keeps the `ping` invoke alive for the
+ * ADR-013 drift guard. The Ping demo button is gone (001c-1): the
+ * sell screen is the main content, and the StatusBar is its footer.
  * All strings come from i18n keys; all styling from tokens.
- * Spec 000b: the Ping button is the registry Button (primary, loading
- * while pinging) and the header gains a Light/Dark/Auto theme control.
  * `data-theme` is owned by the theme provider (and theme-init.js before
  * first render) — never hardcoded here.
  */
@@ -23,27 +26,30 @@ const THEME_OPTIONS: { value: ThemeSetting; labelKey: "theme.light" | "theme.dar
 
 export function Shell({ client }: { client: CoreClient }): ReactElement {
   const { theme, setTheme } = useTheme();
-  const [result, setResult] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [online, setOnline] = useState(true);
 
-  async function onPing(): Promise<void> {
-    setLoading(true);
-    setError(null);
-    try {
-      const pong = await client.ping();
-      setResult(pong.message);
-    } catch {
-      setError(t("shell.error"));
-      setResult(null);
-    } finally {
-      setLoading(false);
-    }
-  }
+  useEffect(() => {
+    let cancelled = false;
+    client
+      .ping()
+      .then(() => {
+        if (!cancelled) {
+          setOnline(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setOnline(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
 
   return (
     <div className="flex min-h-screen flex-col bg-bg text-text">
-      <header className="flex items-center justify-between border-b border-border px-6 py-3">
+      <header className="flex shrink-0 items-center justify-between border-b border-border px-6 py-3">
         <h1 className="text-lg font-semibold">{t("app.title")}</h1>
         <div className="flex items-center gap-4">
           <div role="group" aria-label={t("theme.label")} className="flex items-center gap-1">
@@ -61,28 +67,14 @@ export function Shell({ client }: { client: CoreClient }): ReactElement {
               </Button>
             ))}
           </div>
-          <StatusPill status="online" label={t("status.online")} />
+          <StatusPill status={online ? "online" : "offline"} label={online ? t("status.online") : t("status.offline")} />
         </div>
       </header>
-      <main className="mx-auto flex-1 px-6 py-10">
-        <p className="mb-4 text-muted">{t("shell.hint")}</p>
-        <Button variant="primary" loading={loading} onClick={() => void onPing()}>
-          {loading ? t("shell.pinging") : t("shell.ping")}
-        </Button>
-        {result !== null && (
-          <p className="mt-4">
-            {t("shell.resultLabel")}: {result}
-          </p>
-        )}
-        {error !== null && (
-          <p className="mt-4 text-danger" role="alert">
-            {error}
-          </p>
-        )}
+      <main className="flex min-h-0 flex-1 flex-col">
+        <SessionProvider client={client}>
+          <SellScreen client={client} />
+        </SessionProvider>
       </main>
-      <footer className="border-t border-border px-6 py-2 text-sm text-muted">
-        {t("app.ready")}
-      </footer>
     </div>
   );
 }

@@ -199,7 +199,22 @@ hammering the scratch DB): **1.03 s** from the last draft change to
 the checkpoint completing (`crates/core/tests/scratch.rs`,
 `checkpoint_timer_bound_under_load`). So in a power cut, at most
 ~1 s of draft changes can be lost — the cashier re-scans the last
-line or two. A committed sale is NEVER affected: it lives in the
+line or two.
+
+MAX-WAIT CAP (2026-11-12 follow-up): the 1 s idle deadline above
+keeps moving while the draft keeps changing, so under continuous
+scanning the timer could NEVER fire and the loss window was
+unbounded. The timer now ALSO fires at least every ~5 s
+(`DEFAULT_CHECKPOINT_MAX_WAIT`) since the DB first became dirty
+(`dirty_since`, set on the first change after a checkpoint) — the
+earlier of the idle deadline and the max-wait deadline wins.
+MEASURED (2026-11-12, dev VM, 4 writer threads hammering, test
+values interval 50 ms / max wait 150 ms): first checkpoint under
+continuous change after **217 ms**, **4 checkpoints in ~600 ms** of
+load (one per ~150 ms, as designed), final-change bound 114 ms.
+Scaled to the production values (1 s / 5 s), the loss window under
+continuous change is ~5 s plus checkpoint overhead (~70 ms here).
+The idle-case bound (~1 s) is unchanged. A committed sale is NEVER affected: it lives in the
 main DB (`synchronous=FULL`) and is idempotent per `draft_id`
 (UNIQUE), so a second `complete_sale_cash` with the same `draft_id`
 returns the existing sale. A completed draft is TOMBSTONED in the
@@ -339,6 +354,110 @@ gate test, and the SQLCipher key round-trip. Consequence: the
 `bundled-sqlcipher-vendored-openssl` feature and the vendored
 OpenSSL build (ADR-022) are unchanged; the Windows CI job must
 still build and pass with vendored OpenSSL.
+
+## ADR-038 — Separate dev artifact in CI (dev-seed + dev-session, own data folder). Accepted 2026-11-12 (owner decision, 001c-1 follow-up 4)
+
+CI builds a second Windows artifact, `shopcore-desktop-dev`, from
+`just build-dev`: `tauri build --features dev-session --config
+tauri.dev.conf.json`. The dev config overrides ONLY the app
+identifier (`com.shopcore.desktop.dev`); the product name stays
+`ShopCore`, so the exe name stays `shopcore-desktop.exe` and the
+window title is unchanged — the in-UI banner is what distinguishes
+the build. Tauri derives the data folder from the identifier
+(`app.path().app_data_dir()`), so the dev build keeps its own
+`shopcore.db` / `scratch.db` and never touches the prod data
+directory. No data-dir override flag or env var is needed.
+
+The dev build shows a visible "DEV BUILD — sample data" banner
+above the scan input (gated on `StatusDto.dev_build`, set from
+`cfg!(feature = "dev-session")`) and lists the sample barcodes
+with prices and tax modes, read from the LIVE seeded catalog
+(`shopcore_core::seed::sample_barcodes`, price converted through
+the domain's `line_gross` for one unit — never a bare division),
+not from hardcoded constants.
+
+Two deliberate deviations from the brief's plan, both forced by
+the ADR-013 drift guard (which requires the Rust command set to
+match the UI invokes EXACTLY, with no allowlist):
+
+- The `list_sample_barcodes` `#[tauri::command]` fn exists in EVERY
+  build; only its implementation is feature-gated (without
+  `dev-session` it returns `DEV_NOT_AVAILABLE`). A literally
+  cfg-gated command would fail `just check`, because the UI's
+  `invoke("list_sample_barcodes")` is unconditional. No dev data is
+  compiled into a release build — the real impl and the seed module
+  are both behind `dev-seed` / `dev-session`.
+- The `build-dev` CI job greps the dev binary for the marker
+  POSITIVELY (must be FOUND). The release-absence step in
+  `build-windows` is untouched and still runs.
+
+`workflow_dispatch` was added to the workflow triggers so the
+branch run can be dispatched manually (`gh workflow run ci.yml
+--ref wip/001c-1`); a push to a WIP branch does not trigger CI.
+The check job also runs the desktop tests with `dev-session` on,
+covering the feature-gated command impl and the `dev_build` flag.
+
+## Spec 001c-1 judgment calls (2026-11-12, implementation)
+
+The spec lists 7 commands; three more were needed for the initial
+read and are recorded here rather than silently added:
+
+- `get_session` — the `SessionProvider` seam (amendment 4). It returns
+  `Option<SessionDto>`; the command keeps the `Result<_, AppError>`
+  shape every command has (clippy `unnecessary_wraps` allowed on
+  this one fn, with the reason in the code).
+- `get_status` — the status bar's initial state. It re-queries the
+  open shift on every call (stays live); the printer state comes
+  from the mock driver's real `offline` flag; `sync_configured` is a
+  constant `false` until a sync-config spec wires it — never a fake
+  synced state.
+- `get_cart` — req. 6 (render the restored draft). No other command
+  returns the current draft.
+
+Other calls made during implementation:
+
+- `sale.completed`'s payload type lands in 001c-1, but the first
+  emission lands in 001c-2 with `complete_sale_cash` — no sale can
+  complete before then.
+- No PAY button in 001c-1. A dead PAY button is worse than none;
+  the payment panel lands in 001c-2.
+- A scan with no active price (`price_e4: None`) shows an inline
+  "no price" message instead of adding a free line.
+- `draft_cancel` returns a fresh empty cart (a new draft is opened
+  after cancelling) so the UI always has a current draft.
+- IPC integers (amendment 3): ts-rs 12 exports `i64` as `bigint`
+  by default, so every `i64` DTO field carries
+  `#[ts(type = "number")]` — and `Option<i64>` carries
+  `#[ts(type = "number | null")]`, because the override replaces
+  the whole type including the nullability (caught by `tsc`:
+  `price_e4` briefly exported as plain `number`). `gen_types.rs`
+  strips the `import type { X } from "./X"` lines ts-rs emits for
+  referenced types, because all types live in the one generated
+  file (a dangling import broke `tsc` for `CartViewDto`).
+- Tauri commands MUST take owned args (borrowed types cannot be
+  deserialised from the JSON invoke payload), so the `String`
+  params on the `#[tauri::command]` fns are framework-dictated:
+  clippy's `needless_pass_by_value` is allowed on each command fn,
+  and the testable impl fns take `&str`.
+- The ADR-013 drift-guard scanner (`rust_commands`) now skips
+  `#[...]` attribute lines between `#[tauri::command]` and the
+  `fn` — the clippy allows above sit there. A test comment may
+  never contain an invoke string literal: the scanner reads all
+  of `apps/ui/src`, comments included (one was caught this way).
+- Search is debounced 150 ms; the timer is cleared on submit/add/
+  escape, or a stale timer reopens results with the pre-scan text
+  after the scan completes (found in testing).
+- Keyboard shortcuts (+/−/Del/Ctrl+Z) live on the scan input (a
+  native interactive element), not on a layout div — the a11y
+  rules forbid handlers on non-interactive elements, and the input
+  is refocused after every action anyway (row select included).
+- The UI derives printer status from the till status directly,
+  with `hardware.status` events as an override — the previous
+  state+effect needed one extra render cycle and the status bar
+  lagged one frame behind the session.
+- `just dev` runs `tauri dev --features dev-session`; CI has a
+  check-job step compiling the desktop with that feature, so
+  feature-gated code is compiled in CI, not only on a dev machine.
 
 ## ADR-009 assessment (spec 005, 2026-11-10) — KEEP
 The spike's 12 chaos tests all pass against a real Postgres (local) — duplicate delivery, out-of-order batches, connection drop, server restart, clock skew, two tills selling the last unit, upgrade with unsent outbox, snapshot interrupt/resume, full-history replay (byte-identical, unique constraint proven to fire), per-field LWW merge, gap detector, revalidation stub. No chaos test exposed a protocol design flaw, so the stop condition did not trigger. ADR-009 (custom outbox/inbox sync, not generic CRDT) is KEPT for Phase 5. Two notes for Phase 5: (1) the per-tenant sequence lock serializes batches per tenant — under high concurrency this is a throughput ceiling to measure; (2) the snapshot catalog is the set of SKUs the server has seen (via movements/price entries), not the full 500k-SKU catalog — the full-catalog snapshot is the manual target-PC run.

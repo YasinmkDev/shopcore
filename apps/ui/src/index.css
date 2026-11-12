@@ -70,3 +70,49 @@ body {
   font-family: "Inter Variable", system-ui, "Segoe UI", sans-serif;
   font-variant-numeric: tabular-nums;
 }
+
+/* Sell screen motion (spec 001c-1, req. 9 — the ONLY animations in
+   checkout; both animate transform/opacity only, per 10-ui-system).
+   Cart row insert: 100 ms opacity + 4 px translate. Tier 2 (minimal)
+   is opacity-only, ≤ 100 ms. Total changes: 250 ms background tint
+   fade on the grand total (no count-up). */
+@keyframes cart-row-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes cart-row-enter-minimal {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes total-tint {
+  from {
+    background-color: var(--accent-subtle);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.cart-row-enter {
+  animation: cart-row-enter 100ms ease-out;
+}
+
+.cart-row-enter-minimal {
+  animation: cart-row-enter-minimal 100ms ease-out;
+}
+
+.total-flash {
+  animation: total-tint 250ms ease-out;
+}

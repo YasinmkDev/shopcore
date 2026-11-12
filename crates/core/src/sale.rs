@@ -14,7 +14,7 @@
 //! Tax mode: the mode comes from the DATA — each line's tax group
 //! carries `price_includes_tax` (0 = exclusive, 1 = inclusive), so a
 //! sale's lines may mix modes and each line uses its own group's flag
-//! ([`tax_spec_for_group`]). There is no sale-level mode parameter and
+//! ([`crate::tax::tax_spec_for_group`]). There is no sale-level mode parameter and
 //! no tenant default (owner decision 2026-11-11).
 //!
 //! Timestamps: epoch-ms integers + the `now_ms` helper, consistent
@@ -31,11 +31,11 @@
 
 use std::fmt::Write;
 
-use rusqlite::{OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use shopcore_db::Db;
 use shopcore_domain::{
-    BillDiscount, CartResult, CashRounding, LineDiscount, LineInput, Money, Qty, Rate, TaxSpec,
-    UnitPrice, compute_change, next_receipt_number, price_cart,
+    BillDiscount, CartResult, CashRounding, LineDiscount, LineInput, Money, Qty, UnitPrice,
+    compute_change, next_receipt_number, price_cart,
 };
 use shopcore_hardware::{
     CashDrawer, HardwareError, PrintDoc, PrintLine, PrintPayment, ReceiptPrinter,
@@ -50,6 +50,7 @@ use crate::settings::{
     KEY_CASH_ROUNDING_GRANULARITY_MINOR, KEY_TENANT_CURRENCY_EXPONENT, SCOPE_TENANT,
     get_setting_i64,
 };
+use crate::tax::tax_spec_for_group;
 use crate::users::get_role;
 
 /// Errors from the sale use cases. Each maps to a stable code via
@@ -114,6 +115,10 @@ impl SaleError {
                 shopcore_domain::DomainError::InsufficientTender => "INSUFFICIENT_TENDER",
                 _ => "DOMAIN_ERROR",
             },
+            // A missing tax group keeps its own code through the
+            // `Core` wrapper (the sale path prices through
+            // `tax_spec_for_group`, which returns `CoreError`).
+            Self::Core(CoreError::TaxGroupNotFound(_)) => "TAX_GROUP_NOT_FOUND",
             Self::Core(_) => "CORE_ERROR",
             Self::Hardware(_) => "HARDWARE_ERROR",
             Self::NotFound(_) => "NOT_FOUND",
@@ -382,84 +387,6 @@ pub fn negative_stock_skus(
     })?)
 }
 
-/// Build a line's [`TaxSpec`] from its tax group, plus the
-/// `(tax_rate_id, rate_bp)` pairs (in group order) for the
-/// `sale_line_tax` rows. Rates are ordered by creation
-/// (`created_at, id` — `UUIDv7` ids are time-ordered, so the id breaks
-/// same-millisecond ties in creation order).
-///
-/// Rules: a `SKU` with NO tax group is an error (the catalog is
-/// incomplete — tax cannot be computed without a group, and a
-/// `sale_line_tax` row needs a `tax_rate_id`). A group with NO rate
-/// rows, or with ALL rates zero, is exempt (no `sale_line_tax` rows).
-/// Otherwise the rates apply per the group's `price_includes_tax`
-/// flag (0 = exclusive, 1 = inclusive) — the mode comes from the
-/// data, so a sale's lines may mix modes.
-///
-/// # Errors
-///
-/// Returns [`SaleError::InvalidInput`] when the `SKU` has no tax group
-/// or a rate is out of range, and [`SaleError::Db`] if the read fails.
-pub fn tax_spec_for_group(
-    tx: &Transaction<'_>,
-    tenant_id: &str,
-    tax_group_id: Option<&str>,
-) -> Result<(TaxSpec, Vec<(String, i64)>), SaleError> {
-    let Some(group_id) = tax_group_id else {
-        return Err(SaleError::InvalidInput(
-            "SKU has no tax group; tax cannot be computed".to_string(),
-        ));
-    };
-    // The mode comes from the data (owner decision 2026-11-11): a
-    // missing group row reads as exclusive (the column defaults to 0).
-    let price_includes_tax: i64 = tx
-        .query_row(
-            "SELECT price_includes_tax FROM tax_group WHERE tenant_id = ?1 AND id = ?2 AND deleted_at IS NULL",
-            rusqlite::params![tenant_id, group_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or(0);
-    let mut stmt = tx.prepare(
-        "SELECT id, rate_bp FROM tax_rate WHERE tenant_id = ?1 AND tax_group_id = ?2 AND deleted_at IS NULL ORDER BY created_at, id",
-    )?;
-    let rows = stmt.query_map(rusqlite::params![tenant_id, group_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?;
-    let mut pairs: Vec<(String, i64)> = Vec::new();
-    for row in rows {
-        pairs.push(row?);
-    }
-    if pairs.is_empty() {
-        return Ok((
-            TaxSpec::Exempt {
-                reason: "no tax rates configured for group".to_string(),
-            },
-            Vec::new(),
-        ));
-    }
-    if pairs.iter().all(|(_, bp)| *bp == 0) {
-        return Ok((
-            TaxSpec::Exempt {
-                reason: "zero-rated".to_string(),
-            },
-            Vec::new(),
-        ));
-    }
-    let mut rates: Vec<Rate> = Vec::with_capacity(pairs.len());
-    for (_, bp) in &pairs {
-        let bp_u32 = u32::try_from(*bp)
-            .map_err(|_| SaleError::InvalidInput(format!("tax rate {bp} bp is out of range")))?;
-        rates.push(Rate::from_basis_points(bp_u32).map_err(SaleError::Domain)?);
-    }
-    let spec = if price_includes_tax != 0 {
-        TaxSpec::Inclusive { rates }
-    } else {
-        TaxSpec::Exclusive { rates }
-    };
-    Ok((spec, pairs))
-}
-
 /// One priced line, with the `SKU` name and tax-rate pairs the sale
 /// needs for its `sale_line_tax` rows.
 struct PricedLine {
@@ -480,6 +407,7 @@ fn build_print_doc(
     receipt_no: &str,
     lines: &[PrintLine],
     subtotal_minor: i64,
+    net_subtotal_minor: i64,
     tax_minor: i64,
     total_minor: i64,
     tender_minor: i64,
@@ -497,6 +425,7 @@ fn build_print_doc(
         ],
         lines: lines.to_vec(),
         subtotal_minor,
+        net_subtotal_minor,
         tax_minor,
         total_minor,
         payments: vec![PrintPayment {
@@ -1197,6 +1126,7 @@ fn queue_sale_print_job(
         receipt_no,
         print_lines,
         priced.cart.subtotal.minor(),
+        priced.cart.net.minor(),
         priced.cart.tax.minor(),
         priced.total_minor,
         ctx.tender_minor,
@@ -1268,6 +1198,33 @@ fn sale_payload_json(
     )
 }
 
+/// Bill net of a completed sale, from its stored lines: each line's
+/// total is `net + tax`, so `Σ(line total − line tax)` is the bill
+/// net in every tax mode. The replay paths rebuild the receipt from
+/// the stored rows (the `sale` row stores the gross subtotal only —
+/// the net is not a column), and the net is NOT
+/// `subtotal − discount − tax`: that equation holds only for
+/// exclusive lines (for inclusive lines the gross already contains
+/// the tax). The rounding line is therefore
+/// `total − (net_subtotal + tax)`, never
+/// `total − (subtotal − discount + tax)`.
+///
+/// # Errors
+///
+/// Returns [`shopcore_db::DbError`] if the read fails.
+fn load_sale_net_subtotal(
+    conn: &Connection,
+    tenant_id: &str,
+    sale_id: &str,
+) -> Result<i64, shopcore_db::DbError> {
+    let net: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(total_minor - tax_minor), 0) FROM sale_line WHERE tenant_id = ?1 AND sale_id = ?2 AND deleted_at IS NULL",
+        rusqlite::params![tenant_id, sale_id],
+        |row| row.get(0),
+    )?;
+    Ok(net)
+}
+
 /// The pre-transaction twin of [`load_completed_sale`]: rebuild a
 /// completed sale's output from the actor's read pool (used by the
 /// idempotent replay in [`complete_sale_cash`] — the draft is already
@@ -1303,7 +1260,7 @@ fn replay_completed_sale(
             .map_err(shopcore_db::DbError::Sql)
         }
     })?;
-    let Some((receipt_no, subtotal, discount, tax, total)) = row else {
+    let Some((receipt_no, subtotal, _discount, tax, total)) = row else {
         return Err(SaleError::NotFound(format!(
             "sale {sale_id} does not exist"
         )));
@@ -1323,7 +1280,17 @@ fn replay_completed_sale(
     })?
     .unwrap_or(0);
     let change_minor = tender - total;
-    let rounding_line_minor = total - (subtotal - discount + tax);
+    // The rounding line comes from the NET subtotal (see
+    // `load_sale_net_subtotal`): the gross equation
+    // `total - (subtotal - discount + tax)` is wrong for inclusive
+    // lines — it reports a spurious `-tax` rounding line on a sale
+    // with rounding off.
+    let net_subtotal = {
+        let tenant_id = tenant_id.clone();
+        let sale_id = sale_id.clone();
+        db.read(move |conn| load_sale_net_subtotal(conn, &tenant_id, &sale_id))?
+    };
+    let rounding_line_minor = total - (net_subtotal + tax);
     let print_lines = load_replay_print_lines(db, &tenant_id, &sale_id)?;
     let (print_job_id, receipt_queued): (String, bool) = db
         .read({
@@ -1350,6 +1317,7 @@ fn replay_completed_sale(
         &receipt_no,
         &print_lines,
         subtotal,
+        net_subtotal,
         tax,
         total,
         tender,
@@ -1419,7 +1387,7 @@ fn load_completed_sale(
             },
         )
         .optional()?;
-    let Some((sale_id, receipt_no, subtotal, discount, tax, total)) = row else {
+    let Some((sale_id, receipt_no, subtotal, _discount, tax, total)) = row else {
         return Ok(None);
     };
     let tender: i64 = tx
@@ -1431,7 +1399,11 @@ fn load_completed_sale(
         .optional()?
         .unwrap_or(0);
     let change_minor = tender - total;
-    let rounding_line_minor = total - (subtotal - discount + tax);
+    // The rounding line comes from the NET subtotal (see
+    // `load_sale_net_subtotal`): the gross equation is wrong for
+    // inclusive lines (spurious `-tax` rounding line).
+    let net_subtotal = load_sale_net_subtotal(tx, &ctx.tenant_id, &sale_id)?;
+    let rounding_line_minor = total - (net_subtotal + tax);
     let mut stmt = tx.prepare(
         "SELECT l.qty_milli, l.unit_price_e4, l.total_minor, s.name FROM sale_line l JOIN sku s ON s.id = l.sku_id WHERE l.tenant_id = ?1 AND l.sale_id = ?2 ORDER BY l.rowid ASC",
     )?;
@@ -1465,6 +1437,7 @@ fn load_completed_sale(
         &receipt_no,
         &print_lines,
         subtotal,
+        net_subtotal,
         tax,
         total,
         tender,

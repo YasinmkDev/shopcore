@@ -16,9 +16,11 @@ setup:
 # NOTE: the Tauri CLI is called by its node_modules/.bin path, NOT via
 # `pnpm --filter @shopcore/ui exec` — pnpm exec re-chroots to apps/ui and
 # the CLI then cannot find tauri.conf.json (hit 2026-11-10).
+# Spec 001c-1: `dev-session` enables the dev auto-session (amendment 4) —
+# a dev till with no sign-in. `just build` does NOT enable it.
 [working-directory: 'crates/desktop/src-tauri']
 dev:
-    ../../../apps/ui/node_modules/.bin/tauri dev
+    ../../../apps/ui/node_modules/.bin/tauri dev --features dev-session
 
 # Build the desktop app for the current OS (Tauri build, from the crate root).
 # On Windows CI this produces target/release/shopcore-desktop.exe plus the
@@ -27,6 +29,15 @@ dev:
 [working-directory: 'crates/desktop/src-tauri']
 build:
     ../../../apps/ui/node_modules/.bin/tauri build
+
+# Build the DEV artifact (001c-1 follow-up 4): `dev-session` (which
+# enables the dev seed + dev auto-session) with the dev app identifier
+# from tauri.dev.conf.json. Tauri derives the data folder from the
+# identifier, so the dev build keeps its own shopcore.db/scratch.db
+# and never touches the prod data directory. Same exe path as `build`.
+[working-directory: 'crates/desktop/src-tauri']
+build-dev:
+    ../../../apps/ui/node_modules/.bin/tauri build --features dev-session --config tauri.dev.conf.json
 
 # Full gate. Must exit 0 before any work is considered done.
 check:

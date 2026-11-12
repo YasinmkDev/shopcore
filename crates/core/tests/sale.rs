@@ -1264,6 +1264,32 @@ fn mixed_mode_sale_uses_each_lines_own_flag() {
     assert_eq!(fx.tax_rows(), vec![(1_800, 1_800), (1_800, 1_800)]);
 }
 
+#[test]
+fn missing_tax_group_errors_tax_group_not_found() {
+    // The STD group's row is soft-deleted after the catalog is built.
+    // Completing a sale on an exclusive SKU must fail with the stable
+    // code TAX_GROUP_NOT_FOUND — never a silent zero-tax sale — and
+    // no sale row may commit.
+    let fx = Fixture::new("tax-group-missing");
+    fx.db
+        .write(|conn| {
+            conn.execute(
+                "UPDATE tax_group SET deleted_at = ?1 WHERE tenant_id = ?2 AND id = ?3",
+                rusqlite::params![NOW, TENANT, TAX_STD_ID],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let draft_id = fx.draft_with(&[("TST100", 1_000)]);
+    let err = fx.complete(&draft_id, 11_800).unwrap_err();
+    assert_eq!(err.code(), "TAX_GROUP_NOT_FOUND", "unexpected error: {err}");
+    assert_eq!(
+        fx.count("SELECT COUNT(*) FROM sale"),
+        0,
+        "no sale may commit without its tax group"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Net cash (owner fix 2026-11-11)
 // ---------------------------------------------------------------------------
@@ -1318,6 +1344,41 @@ fn replay_with_a_different_tender_returns_the_original_sale() {
     assert_eq!(
         fx.count("SELECT COUNT(*) FROM stock_movement WHERE type = 'sale'"),
         1
+    );
+}
+
+#[test]
+fn replay_of_an_inclusive_sale_has_no_spurious_rounding_line() {
+    // The replay paths used to compute the rounding line from the
+    // GROSS equation `total - (subtotal - discount + tax)`: for an
+    // inclusive sale with rounding OFF that is `-tax` — a spurious
+    // "Cash rounding: -1800" footer line on the rebuilt receipt.
+    // The rounding line now comes from the net:
+    // `total - (net_subtotal + tax)`, and the rebuilt receipt carries
+    // the net subtotal.
+    let fx = Fixture::new("replay-inclusive");
+    let draft_id = fx.draft_with(&[("TST118", 1_000)]);
+    let first = fx.complete(&draft_id, 11_800).unwrap();
+    assert_eq!(first.total_minor, 11_800);
+    assert_eq!(first.rounding_line_minor, 0);
+    assert_eq!(first.print_doc.subtotal_minor, 11_800);
+    assert_eq!(first.print_doc.net_subtotal_minor, 10_000);
+    assert_eq!(first.print_doc.tax_minor, 1_800);
+    let second = fx.complete(&draft_id, 11_800).unwrap();
+    assert!(
+        second.already_completed(),
+        "the second call is a replay, not a new sale"
+    );
+    assert_eq!(second.sale_id, first.sale_id);
+    assert_eq!(
+        second.rounding_line_minor, 0,
+        "a replayed inclusive sale must not invent a rounding line"
+    );
+    assert_eq!(second.print_doc.net_subtotal_minor, 10_000);
+    assert_eq!(
+        second.print_doc.net_subtotal_minor + second.print_doc.tax_minor,
+        second.print_doc.total_minor,
+        "the rebuilt receipt satisfies net_subtotal + tax == total"
     );
 }
 

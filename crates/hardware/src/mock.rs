@@ -34,6 +34,13 @@ impl MockPrinter {
     pub fn set_offline(&mut self, offline: bool) {
         self.offline = offline;
     }
+
+    /// Whether the printer is currently offline (the status bar reads
+    /// this; the mock starts online).
+    #[must_use]
+    pub fn is_offline(&self) -> bool {
+        self.offline
+    }
 }
 
 impl ReceiptPrinter for MockPrinter {
@@ -141,6 +148,7 @@ mod tests {
             header: vec!["Shop".to_string()],
             lines: vec![],
             subtotal_minor: 0,
+            net_subtotal_minor: 0,
             tax_minor: 0,
             total_minor: 0,
             payments: vec![],

@@ -10,9 +10,14 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub mod checkout;
 pub mod sync;
 pub mod time;
 
+pub use checkout::{
+    CartLineDto, CartTotalsDto, CartViewDto, HardwareStatusPayload, SaleCompletedPayload,
+    SampleBarcodeDto, SessionDto, SkuHitDto, StatusDto,
+};
 pub use sync::{Cursor, OutboxRow, PriceListEntry, PullResponse, SyncAck, SyncBatch, Tombstone};
 pub use time::{from_iso8601, to_iso8601};
 

@@ -14,7 +14,11 @@
 //! 1 s after the draft last changed, the timer forces a WAL checkpoint
 //! (`PRAGMA wal_checkpoint(TRUNCATE)`) OFF the scan path, bounding
 //! the loss window to ~1 s plus the checkpoint duration (measured —
-//! see ADR-034). A committed sale is never affected: it lives in the
+//! see ADR-034). Under continuous draft changes the 1 s idle deadline
+//! keeps moving, so a checkpoint ALSO fires at least every ~5 s since
+//! the DB first became dirty (`DEFAULT_CHECKPOINT_MAX_WAIT`) — the
+//! loss window under load is bounded by ~5 s, not unbounded.
+//! A committed sale is never affected: it lives in the
 //! main DB (`synchronous=FULL`). A process kill loses nothing (the OS
 //! still flushes the file); only a real power cut can lose the
 //! un-checkpointed tail, and the manual power-pull test (pre-pilot
@@ -39,8 +43,16 @@ use crate::CoreError;
 /// this long after the draft last changed (ADR-034).
 pub const DEFAULT_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 
+/// The default max wait between checkpoints: even under continuous
+/// draft changes (which keep re-arming the idle timer), the timer
+/// forces a WAL checkpoint at least this often since the last flush
+/// (ADR-034, 2026-11-12 follow-up). Bounds the loss window under
+/// load to ~`MAX_WAIT` instead of unbounded.
+pub const DEFAULT_CHECKPOINT_MAX_WAIT: Duration = Duration::from_secs(5);
+
 /// The checkpoint timer's shared state: the last draft change (or
-/// `None` when nothing is dirty) and the shutdown flag.
+/// `None` when nothing is dirty), the first change since the last
+/// checkpoint, and the shutdown flag.
 struct CheckpointState {
     inner: Mutex<CheckpointInner>,
     changed: Condvar,
@@ -48,6 +60,11 @@ struct CheckpointState {
 
 struct CheckpointInner {
     last_change: Option<Instant>,
+    /// First draft change since the last checkpoint (`None` when
+    /// clean). The max-wait deadline is measured from here: a
+    /// checkpoint fires at most `max_wait` after the DB first became
+    /// dirty, even if changes keep arriving.
+    dirty_since: Option<Instant>,
     shutdown: bool,
 }
 
@@ -56,6 +73,7 @@ impl CheckpointState {
         Self {
             inner: Mutex::new(CheckpointInner {
                 last_change: None,
+                dirty_since: None,
                 shutdown: false,
             }),
             changed: Condvar::new(),
@@ -64,9 +82,13 @@ impl CheckpointState {
 
     /// Mark the draft changed (a draft write happened): the timer
     /// fires one interval after this instant, unless another change
-    /// moves it later.
+    /// moves it later. The first change after a checkpoint also
+    /// starts the max-wait clock (`dirty_since`).
     fn mark_changed(&self) {
         if let Ok(mut inner) = self.inner.lock() {
+            if inner.last_change.is_none() {
+                inner.dirty_since = Some(Instant::now());
+            }
             inner.last_change = Some(Instant::now());
         }
         self.changed.notify_one();
@@ -184,6 +206,7 @@ impl ScratchDb {
 
     /// Open with a custom checkpoint interval (tests use a short
     /// interval, e.g. 50 ms, so the timer test does not wait a second).
+    /// The max wait between checkpoints is the default (5 s).
     ///
     /// # Errors
     ///
@@ -192,6 +215,21 @@ impl ScratchDb {
     pub fn open_with_checkpoint_interval(
         path: impl AsRef<Path>,
         interval: Duration,
+    ) -> Result<Self, CoreError> {
+        Self::open_with_checkpoint_intervals(path, interval, DEFAULT_CHECKPOINT_MAX_WAIT)
+    }
+
+    /// Open with a custom checkpoint interval AND max wait (tests use
+    /// short values for both, so the max-wait test does not wait 5 s).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Db`] if the file cannot be opened or the
+    /// pragmas / DDL fail.
+    pub fn open_with_checkpoint_intervals(
+        path: impl AsRef<Path>,
+        interval: Duration,
+        max_wait: Duration,
     ) -> Result<Self, CoreError> {
         let path = path.as_ref().to_path_buf();
         let conn = Connection::open(&path)?;
@@ -207,16 +245,18 @@ impl ScratchDb {
         let checkpoint_state = Arc::new(CheckpointState::new());
         let checkpoints = Arc::new(AtomicU64::new(0));
         // The checkpoint timer thread (ADR-034): forces a WAL
-        // checkpoint one interval after the draft last changed, off
-        // the scan path. The thread's join handle is kept so
-        // `shutdown` (and `Drop`) can join it — the thread must be
-        // joined, never detached, before the scratch files are
-        // deleted (ADR-036).
+        // checkpoint one interval after the draft last changed, and
+        // at least every `max_wait` since the last flush even under
+        // continuous changes, off the scan path. The thread's join
+        // handle is kept so `shutdown` (and `Drop`) can join it —
+        // the thread must be joined, never detached, before the
+        // scratch files are deleted (ADR-036).
         let timer_handle = {
             let timer = CheckpointTimer {
                 conn: Arc::clone(&conn),
                 state: Arc::clone(&checkpoint_state),
                 interval,
+                max_wait,
                 checkpoints: Arc::clone(&checkpoints),
             };
             std::thread::spawn(move || checkpoint_timer(timer))
@@ -405,20 +445,28 @@ struct CheckpointTimer {
     conn: Arc<Mutex<Connection>>,
     state: Arc<CheckpointState>,
     interval: Duration,
+    /// Max time between checkpoints even under continuous changes.
+    max_wait: Duration,
     checkpoints: Arc<AtomicU64>,
 }
 
 /// The checkpoint timer thread: waits until the draft is dirty, then
-/// until one interval has passed since the LAST change, then forces a
-/// WAL checkpoint on the shared connection. The scan path never waits
-/// on it — a draft write only notifies the thread
-/// ([`CheckpointState::mark_changed`]); the checkpoint itself runs
-/// here, taking the connection mutex only for its own duration.
+/// until one interval has passed since the LAST change — or until the
+/// max wait has passed since the LAST FLUSH, whichever comes first —
+/// then forces a WAL checkpoint on the shared connection. Under
+/// continuous draft changes the idle deadline keeps moving, but the
+/// max-wait deadline does not, so a checkpoint fires at least every
+/// `max_wait` even while the draft keeps changing (ADR-034: the loss
+/// window under load is bounded by `max_wait`, not unbounded). The
+/// scan path never waits on it — a draft write only notifies the
+/// thread ([`CheckpointState::mark_changed`]); the checkpoint itself
+/// runs here, taking the connection mutex only for its own duration.
 fn checkpoint_timer(timer: CheckpointTimer) {
     let CheckpointTimer {
         conn,
         state,
         interval,
+        max_wait,
         checkpoints,
     } = timer;
     loop {
@@ -435,8 +483,11 @@ fn checkpoint_timer(timer: CheckpointTimer) {
         if inner.shutdown {
             return;
         }
-        // Wait until one interval after the LAST change, waking early
-        // when a new change moves the deadline (or on shutdown).
+        // Wait until the earlier of the two deadlines: one interval
+        // after the LAST change, or `max_wait` after the DB FIRST
+        // became dirty since the last checkpoint. Wakes early when a
+        // new change moves the idle deadline (or on shutdown) and
+        // recomputes.
         loop {
             if inner.shutdown {
                 return;
@@ -444,7 +495,10 @@ fn checkpoint_timer(timer: CheckpointTimer) {
             let Some(last) = inner.last_change else {
                 break; // Cleared elsewhere; back to waiting for dirt.
             };
-            let deadline = last + interval;
+            let Some(dirty_since) = inner.dirty_since else {
+                break; // Unreachable while dirty; be safe.
+            };
+            let deadline = (last + interval).min(dirty_since + max_wait);
             let now = Instant::now();
             if now >= deadline {
                 break;
@@ -463,9 +517,11 @@ fn checkpoint_timer(timer: CheckpointTimer) {
         if inner.last_change.is_none() {
             continue;
         }
-        // Clear the dirty flag BEFORE checkpointing: a change that
-        // lands during the checkpoint re-arms the timer.
+        // Clear the dirty flags BEFORE checkpointing: a change that
+        // lands during the checkpoint re-arms the timer (and restarts
+        // the max-wait clock from that change).
         inner.last_change = None;
+        inner.dirty_since = None;
         drop(inner);
         if run_checkpoint(&conn) {
             checkpoints.fetch_add(1, Ordering::SeqCst);
