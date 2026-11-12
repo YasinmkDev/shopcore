@@ -1,7 +1,8 @@
 /**
- * SellScreen tests (spec 001c-1): every state (loading / empty /
- * error / offline), keyboard, F9/F6 no-op, live region, status bar,
- * cancel confirm, `*N` quantity, RTL render, 150% text scaling.
+ * SellScreen tests (spec 001c-1 + 001c-2): every state (loading / empty /
+ * error / offline), keyboard, F9 payment, F6 discount, completion flow,
+ * live region, status bar, cancel confirm, `*N` quantity, RTL render,
+ * 150% text scaling.
  *
  * The screen talks to the core through a fake `CoreClient` — never an
  * invoke string literal in a test file (the ADR-013 drift guard scans
@@ -28,6 +29,8 @@ import type {
   CartLineDto,
   CartTotalsDto,
   CartViewDto,
+  ReceiptDto,
+  SaleCompletedDto,
   SampleBarcodeDto,
   SessionDto,
   SkuHitDto,
@@ -64,6 +67,15 @@ const NO_PRICE: SkuHitDto = {
   price_e4: null,
 };
 
+const TST44: SkuHitDto = {
+  sku_id: "sku-tst44",
+  item_id: "item-tst44",
+  code: "TST44",
+  name: "Test 44",
+  tax_group_id: "std",
+  price_e4: 443_400,
+};
+
 const SESSION: SessionDto = {
   tenant_id: "test-tenant",
   branch_id: "branch-1",
@@ -77,16 +89,20 @@ const SESSION: SessionDto = {
 };
 
 function totalsFor(lines: CartLineDto[]): CartTotalsDto {
-  const subtotal = lines.reduce((sum, line) => sum + line.line_total_minor, 0);
-  // The fake prices exclusive 18% tax (STD group), so the gross
-  // subtotal IS the net subtotal here.
-  const tax = Math.round((subtotal * 18) / 100);
+  // The fake prices exclusive 18% tax (STD group). A line's
+  // `line_total_minor` is its NET (gross − discount), so the gross
+  // subtotal is net + discounts and the displayed pre-tax subtotal
+  // (02 rule) is the same number.
+  const gross = lines.reduce((sum, line) => sum + line.line_total_minor + line.discount_minor, 0);
+  const discount = lines.reduce((sum, line) => sum + line.discount_minor, 0);
+  const net = lines.reduce((sum, line) => sum + line.line_total_minor, 0);
+  const tax = Math.round((net * 18) / 100);
   return {
-    subtotal_minor: subtotal,
-    discount_minor: 0,
-    net_subtotal_minor: subtotal,
+    subtotal_minor: gross,
+    discount_minor: discount,
+    net_subtotal_minor: net,
     tax_minor: tax,
-    total_minor: subtotal + tax,
+    total_minor: net + tax,
   };
 }
 
@@ -114,11 +130,13 @@ class FakeClient implements CoreClient {
   /** The last removed line, for draftRestoreLine. */
   removed: CartLineDto | null = null;
   /** Barcode -> hit, for lookupBarcode. */
-  barcodes: Record<string, SkuHitDto> = { "1234567890100": MILK };
+  barcodes: Record<string, SkuHitDto> = { "1234567890100": MILK, "1234567890999": TST44 };
   /** Search results, for searchSkus. */
   searchHits: SkuHitDto[] = [MILK, BREAD];
   /** Fail the next getCart. */
   cartError = false;
+  /** The printer is offline: completed sales queue their receipt. */
+  printerOffline = false;
 
   private view(): CartViewDto {
     // Fresh objects on every call, like the real transport (Tauri
@@ -151,7 +169,7 @@ class FakeClient implements CoreClient {
     return Promise.resolve(hit);
   });
   draftAddLine = vi.fn((_draftId: string, skuId: string, qtyMilli: number, unitPriceE4: number) => {
-    const hit = [MILK, BREAD, NO_PRICE].find((candidate) => candidate.sku_id === skuId);
+    const hit = [MILK, BREAD, NO_PRICE, TST44].find((candidate) => candidate.sku_id === skuId);
     const existing = this.lines.find(
       (line) => line.sku_id === skuId && line.unit_price_e4 === unitPriceE4,
     );
@@ -204,16 +222,84 @@ class FakeClient implements CoreClient {
     }
     return Promise.resolve(this.view());
   });
-  /** 001c-2: no discount/payment behaviour in this fake yet — CP3
-   * wires the components and gives these fakes real behaviour. */
-  draftApplyDiscount = vi.fn(() =>
-    Promise.reject(new Error("discount not implemented in this fake")),
+  /** 001c-2: the discount flow, mirroring the core's rules — the
+   * cashier's ceiling is 5%; above it a manager (manager / 4321)
+   * must approve, else DISCOUNT_NEEDS_APPROVAL. */
+  draftApplyDiscount = vi.fn(
+    (
+      _draftId: string,
+      lineId: string,
+      kind: "percent" | "fixed",
+      value: number,
+      managerUsername?: string,
+      managerPin?: string,
+    ) => {
+      const line = this.lines.find((candidate) => candidate.id === lineId);
+      if (line === undefined) {
+        return Promise.reject(appError("NOT_FOUND", `Line ${lineId} not found`));
+      }
+      const gross = line.line_total_minor + line.discount_minor;
+      const amount = kind === "percent" ? Math.round((gross * value) / 10_000) : value;
+      if (amount * 10_000 > 500 * gross) {
+        if (managerUsername === undefined || managerPin === undefined) {
+          return Promise.reject(appError("DISCOUNT_NEEDS_APPROVAL", "Manager approval required"));
+        }
+        if (managerUsername !== "manager" || managerPin !== "4321") {
+          return Promise.reject(appError("DISCOUNT_NEEDS_APPROVAL", "Manager approval required"));
+        }
+      }
+      line.discount_minor = amount;
+      line.line_total_minor = gross - amount;
+      return Promise.resolve(this.view());
+    },
   );
-  completeSaleCash = vi.fn(() =>
-    Promise.reject(new Error("payment not implemented in this fake")),
-  );
-  reprintReceipt = vi.fn(() =>
-    Promise.reject(new Error("reprint not implemented in this fake")),
+  /** 001c-2: complete the sale (tender must cover the total), clear
+   * the cart onto a fresh draft, and return the completed sale. */
+  completeSaleCash = vi.fn((_draftId: string, tenderMinor: number) => {
+    const totals = totalsFor(this.lines);
+    if (tenderMinor < totals.total_minor) {
+      return Promise.reject(
+        appError("INSUFFICIENT_TENDER", "Tendered amount is less than the total."),
+      );
+    }
+    const change = tenderMinor - totals.total_minor;
+    const receipt: ReceiptDto = {
+      receipt_no: "MAIN-T1-20261112-1",
+      header: ["ShopCore Test Store"],
+      lines: this.lines.map((line) => ({
+        name: line.name,
+        qty_milli: line.qty_milli,
+        unit_price_e4: line.unit_price_e4,
+        line_total_minor: line.line_total_minor,
+      })),
+      subtotal_minor: totals.subtotal_minor,
+      net_subtotal_minor: totals.net_subtotal_minor,
+      discount_minor: totals.discount_minor,
+      tax_minor: totals.tax_minor,
+      total_minor: totals.total_minor,
+      tender_minor: tenderMinor,
+      change_minor: change,
+      rounding_line_minor: 0,
+      payments: [{ method: "cash", amount_minor: tenderMinor }],
+      footer: ["Thank you"],
+    };
+    const completed: SaleCompletedDto = {
+      sale_id: "sale-1",
+      receipt_no: receipt.receipt_no,
+      total_minor: totals.total_minor,
+      change_minor: change,
+      rounding_line_minor: 0,
+      receipt_queued: this.printerOffline,
+      already_completed: false,
+      receipt,
+    };
+    this.lines = [];
+    this.draftId = "draft-2";
+    return Promise.resolve(completed);
+  });
+  /** 001c-2: reprint prints unless the printer is offline. */
+  reprintReceipt = vi.fn((saleId: string) =>
+    Promise.resolve({ sale_id: saleId, printed: !this.printerOffline }),
   );
   subscribe = vi.fn(() => () => {
     /* no events in these tests */
@@ -231,6 +317,16 @@ function renderSellScreen(client: FakeClient): void {
 
 function scanInput(): HTMLElement {
   return screen.getByLabelText("Scan or search");
+}
+
+/** Type a barcode into the scan input and submit it; resolves once
+ * the scan is processed (the input is cleared after a successful add). */
+async function scanBarcode(code: string): Promise<void> {
+  fireEvent.change(scanInput(), { target: { value: code } });
+  fireEvent.keyDown(scanInput(), { key: "Enter" });
+  await waitFor(() => {
+    expect(scanInput()).toHaveValue("");
+  });
 }
 
 describe("SellScreen", () => {
@@ -426,21 +522,140 @@ describe("SellScreen", () => {
     expect(screen.getByRole("status", { name: "Announcements" })).toHaveTextContent("Restored Milk 1L");
   });
 
-  it("does nothing on F9 and F6 (amendment 2)", async () => {
+  it("opens the payment panel on F9 and on the Pay button", async () => {
     const client = new FakeClient();
     renderSellScreen(client);
     await waitFor(() => {
       expect(scanInput()).toBeInTheDocument();
     });
-    fireEvent.change(scanInput(), { target: { value: "1234567890100" } });
-    fireEvent.keyDown(scanInput(), { key: "Enter" });
+    await scanBarcode("1234567890100");
+    fireEvent.keyDown(scanInput(), { key: "F9" });
+    expect(screen.getByRole("dialog", { name: "Payment" })).toBeInTheDocument();
+    // Grand total + panel total due + remaining + exact quick amount
+    // all read 118.00.
+    expect(screen.getAllByText("118.00")).toHaveLength(4);
+    fireEvent.keyDown(screen.getByLabelText("Tendered"), { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Payment" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Pay" }));
+    expect(screen.getByRole("dialog", { name: "Payment" })).toBeInTheDocument();
+  });
+
+  it("does nothing on F9 with an empty cart", async () => {
+    const client = new FakeClient();
+    renderSellScreen(client);
     await waitFor(() => {
-      expect(screen.getByText("118.00")).toBeInTheDocument();
+      expect(scanInput()).toBeInTheDocument();
     });
     fireEvent.keyDown(scanInput(), { key: "F9" });
+    expect(screen.queryByRole("dialog", { name: "Payment" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pay" })).toBeDisabled();
+  });
+
+  it("opens the discount popover on F6 and applies 5% without a PIN", async () => {
+    const client = new FakeClient();
+    renderSellScreen(client);
+    await waitFor(() => {
+      expect(scanInput()).toBeInTheDocument();
+    });
+    await scanBarcode("1234567890100");
     fireEvent.keyDown(scanInput(), { key: "F6" });
-    expect(client.draftAddLine).toHaveBeenCalledTimes(1);
-    expect(client.draftCancel).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Discount" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Percent off"), { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply discount" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Discount" })).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("112.10")).toBeInTheDocument();
+    expect(client.draftApplyDiscount).toHaveBeenCalledWith("draft-1", "line-1", "percent", 500, undefined, undefined);
+  });
+
+  it("asks for a manager PIN above 5% and applies on approval", async () => {
+    const client = new FakeClient();
+    renderSellScreen(client);
+    await waitFor(() => {
+      expect(scanInput()).toBeInTheDocument();
+    });
+    await scanBarcode("1234567890100");
+    fireEvent.keyDown(scanInput(), { key: "F6" });
+    fireEvent.change(screen.getByLabelText("Percent off"), { target: { value: "10" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply discount" }));
+    await waitFor(() => {
+      expect(screen.getByText("Above your limit — a manager must approve.")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("dialog", { name: "Discount" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Manager username"), { target: { value: "manager" } });
+    fireEvent.change(screen.getByLabelText("Manager PIN"), { target: { value: "0000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Approve & apply" }));
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Discount" })).toBeInTheDocument();
+    });
+    expect(screen.getByText("118.00")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Manager PIN"), { target: { value: "4321" } });
+    fireEvent.click(screen.getByRole("button", { name: "Approve & apply" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Discount" })).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("106.20")).toBeInTheDocument();
+  });
+
+  it("completes a 52.32 sale for 60.00 tender, shows the receipt, clears the cart, refocuses scan", async () => {
+    const client = new FakeClient();
+    renderSellScreen(client);
+    await waitFor(() => {
+      expect(scanInput()).toBeInTheDocument();
+    });
+    await scanBarcode("1234567890999");
+    await waitFor(() => {
+      expect(screen.getByText("52.32")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Pay" }));
+    fireEvent.change(screen.getByLabelText("Tendered"), { target: { value: "60" } });
+    expect(screen.getByText("7.68")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Complete sale" }));
+    await waitFor(() => {
+      expect(screen.getByText("Sale complete")).toBeInTheDocument();
+    });
+    expect(screen.getByText("MAIN-T1-20261112-1")).toBeInTheDocument();
+    expect(screen.getByText("Receipt printed")).toBeInTheDocument();
+    // The cart cleared: the totals are back to zero (the empty-cart
+    // message itself is behind the completion view until dismissed).
+    expect(screen.getAllByText("0.00")).toHaveLength(3);
+    expect(document.activeElement).toBe(scanInput());
+    expect(client.completeSaleCash).toHaveBeenCalledWith("draft-1", 6000);
+    expect(screen.getByRole("status", { name: "Announcements" })).toHaveTextContent(
+      "Sale complete. Total 52.32, change 7.68.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New sale" }));
+    await waitFor(() => {
+      expect(screen.queryByText("Sale complete")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("Scan an item to start the sale.")).toBeInTheDocument();
+  });
+
+  it("shows the queued banner when the printer is offline, and reprint works once it is back", async () => {
+    const client = new FakeClient();
+    client.printerOffline = true;
+    renderSellScreen(client);
+    await waitFor(() => {
+      expect(scanInput()).toBeInTheDocument();
+    });
+    await scanBarcode("1234567890999");
+    fireEvent.click(screen.getByRole("button", { name: "Pay" }));
+    fireEvent.change(screen.getByLabelText("Tendered"), { target: { value: "60" } });
+    fireEvent.click(screen.getByRole("button", { name: "Complete sale" }));
+    await waitFor(() => {
+      expect(screen.getByText("Printer offline — receipt queued")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Reprint receipt" }));
+    await waitFor(() => {
+      expect(screen.getByText("Printer offline — receipt queued")).toBeInTheDocument();
+    });
+    client.printerOffline = false;
+    fireEvent.click(screen.getByRole("button", { name: "Reprint receipt" }));
+    await waitFor(() => {
+      expect(screen.getByText("Receipt printed")).toBeInTheDocument();
+    });
+    expect(client.reprintReceipt).toHaveBeenCalledWith("sale-1");
   });
 
   it("cancels only on the second click (confirm), then shows a fresh cart", async () => {

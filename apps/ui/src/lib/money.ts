@@ -52,6 +52,37 @@ export function formatMoney(minor: number, exponent: number): string {
 }
 
 /**
+ * Parse a typed decimal amount into integer minor units — e.g.
+ * `parseMoneyToMinor("52.32", 2)` is `5232`, `parseMoneyToMinor("60", 2)`
+ * is `6000`. Integer string math only, never float division. Returns
+ * `null` for anything that is not a plain non-negative decimal
+ * (empty, letters, multiple dots, a negative sign, or more fraction
+ * digits than `exponent`). A trailing dot (`"52."`) is not a complete
+ * amount — the caller treats it as an in-progress prefix.
+ */
+export function parseMoneyToMinor(text: string, exponent: number): number | null {
+  checkExponent(exponent);
+  const trimmed = text.trim();
+  if (trimmed === "") {
+    return null;
+  }
+  const match = /^(\d+)(?:\.(\d+))?$/.exec(trimmed);
+  if (match === null) {
+    return null;
+  }
+  const whole = match[1] ?? "";
+  const frac = match[2] ?? "";
+  if (frac.length > exponent) {
+    return null;
+  }
+  const minor = Number(whole + frac.padEnd(exponent, "0"));
+  if (!Number.isSafeInteger(minor)) {
+    return null;
+  }
+  return minor;
+}
+
+/**
  * Format a quantity in milli-units (3 decimals) with trailing zeros
  * trimmed — e.g. `formatQty(2000)` is `"2"`, `formatQty(500)` is
  * `"0.5"`, `formatQty(1250)` is `"1.25"`, `formatQty(1)` is `"0.001"`.

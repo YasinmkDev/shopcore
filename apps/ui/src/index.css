@@ -116,3 +116,33 @@ body {
 .total-flash {
   animation: total-tint 250ms ease-out;
 }
+
+/* Payment panel (001c-2): 150 ms slide from the right edge + fade.
+   Tier 2 (minimal) is opacity-only, ≤ 100 ms. */
+@keyframes payment-panel-enter {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes payment-panel-enter-minimal {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.payment-panel-enter {
+  animation: payment-panel-enter 150ms ease-out;
+}
+
+.payment-panel-enter-minimal {
+  animation: payment-panel-enter-minimal 100ms ease-out;
+}

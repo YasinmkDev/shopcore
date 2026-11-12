@@ -25,6 +25,10 @@ export interface ScanInputProps {
   onDelete: () => void;
   /** Ctrl+Z: restore the last removed line. */
   onRestore: () => void;
+  /** F9: open the payment panel. */
+  onPay: () => void;
+  /** F6: open the discount popover for the selected line. */
+  onDiscount: () => void;
   disabled?: boolean;
   inputRef: RefObject<HTMLInputElement | null>;
 }
@@ -39,6 +43,8 @@ export function ScanInput({
   onAdjustQty,
   onDelete,
   onRestore,
+  onPay,
+  onDiscount,
   disabled = false,
   inputRef,
 }: ScanInputProps): ReactElement {
@@ -86,8 +92,13 @@ export function ScanInput({
         } else if (event.key.toLowerCase() === "z" && (event.ctrlKey || event.metaKey)) {
           event.preventDefault();
           onRestore();
+        } else if (event.key === "F9") {
+          event.preventDefault();
+          onPay();
+        } else if (event.key === "F6") {
+          event.preventDefault();
+          onDiscount();
         }
-        // F9 / F6 are intentionally NOT bound in 001c-1 (amendment 2).
       }}
       className="h-12 w-full rounded-md border border-border-input bg-surface px-4 text-base text-text outline-none placeholder:text-faint focus-visible:ring-2 focus-visible:ring-focus-ring"
     />

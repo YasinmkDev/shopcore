@@ -1,13 +1,18 @@
 /**
- * SellScreen (spec 001c-1): the checkout core. Scan input on top,
- * cart (left ~2/3) + totals (right ~1/3) below, status bar at the
- * bottom. No PAY button (001c-2); F9/F6 are NOT bound (amendment 2).
+ * SellScreen (spec 001c-1 + 001c-2): the checkout core. Scan input on
+ * top, cart (left ~2/3) + totals (right ~1/3) below, status bar at the
+ * bottom.
  *
- * Keyboard: Enter submit, Esc clear input / close results / disarm
- * cancel, ↑/↓ search highlight when results are open else cart
- * selection, +/− quantity on the selected line, Del remove, Ctrl+Z
- * undo (restore the last removed line), `*N` + Enter sets the pending
- * quantity for the next scan.
+ * 001c-2: F9 opens the payment panel (cash only), F6 opens the discount
+ * popover for the selected line, and a completed sale shows its receipt
+ * in place of the cart until dismissed. The cart clears on completion
+ * and focus returns to the scan input within 100 ms.
+ *
+ * Keyboard: Enter submit, Esc clear input / close results / close panel
+ * / dismiss receipt / disarm cancel, ↑/↓ search highlight when results
+ * are open else cart selection, +/− quantity on the selected line, Del
+ * remove, Ctrl+Z undo (restore the last removed line), `*N` + Enter sets
+ * the pending quantity for the next scan, F6 discount, F9 pay.
  *
  * Focus: the scan input is focused on mount and refocused after
  * every action (focus return < 100 ms, req. 11).
@@ -19,7 +24,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import { useMotionTier } from "@shopcore/ui-kit";
 import { t } from "@shopcore/i18n";
-import type { CartViewDto, SkuHitDto } from "@shopcore/protocol-ts";
+import type { CartViewDto, SaleCompletedDto, SkuHitDto } from "@shopcore/protocol-ts";
 import type { CoreClient } from "../../lib/core-client";
 import { formatMoney, formatQty } from "../../lib/money";
 import { useSession } from "./SessionProvider";
@@ -27,10 +32,15 @@ import { DevBanner } from "./DevBanner";
 import { ScanInput } from "./ScanInput";
 import { CartTable } from "./CartTable";
 import { TotalsPanel } from "./TotalsPanel";
+import { PaymentPanel } from "./PaymentPanel";
+import { ManagerPinPopover } from "./ManagerPinPopover";
+import { ReceiptPreview } from "./ReceiptPreview";
 import { StatusBar } from "./StatusBar";
 
 /** The stable error code the Rust side returns for an unknown barcode. */
 const BARCODE_NOT_FOUND = "BARCODE_NOT_FOUND";
+/** The stable error code for a discount above the cashier's ceiling. */
+const DISCOUNT_NEEDS_APPROVAL = "DISCOUNT_NEEDS_APPROVAL";
 
 function errorCode(err: unknown): string | null {
   if (typeof err === "object" && err !== null && "code" in err) {
@@ -68,6 +78,15 @@ export function SellScreen({ client }: { client: CoreClient }): ReactElement {
   const [newLineId, setNewLineId] = useState<string | null>(null);
   const [cancelArmed, setCancelArmed] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+  // 001c-2: payment panel, discount popover, completed sale.
+  const [paymentOpen, setPaymentOpen] = useState(false);
+  const [paymentBusy, setPaymentBusy] = useState(false);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [discountOpen, setDiscountOpen] = useState(false);
+  const [discountBusy, setDiscountBusy] = useState(false);
+  const [discountNeedsApproval, setDiscountNeedsApproval] = useState(false);
+  const [completed, setCompleted] = useState<SaleCompletedDto | null>(null);
+  const [reprintBusy, setReprintBusy] = useState(false);
   // Printer status comes from the till status; a hardware.status event
   // overrides it live until the next status load.
   const [printerOverride, setPrinterOverride] = useState<string | null>(null);
@@ -281,6 +300,23 @@ export function SellScreen({ client }: { client: CoreClient }): ReactElement {
 
   const handleEscape = (): void => {
     clearSearchTimer();
+    if (paymentOpen) {
+      setPaymentOpen(false);
+      setPaymentError(null);
+      focusScan();
+      return;
+    }
+    if (discountOpen) {
+      setDiscountOpen(false);
+      setDiscountNeedsApproval(false);
+      focusScan();
+      return;
+    }
+    if (completed !== null) {
+      setCompleted(null);
+      focusScan();
+      return;
+    }
     if (cancelArmed) {
       setCancelArmed(false);
       return;
@@ -429,6 +465,129 @@ export function SellScreen({ client }: { client: CoreClient }): ReactElement {
       .finally(endWork);
   };
 
+  // ---- spec 001c-2: discount, payment, completion ----
+
+  /** The line a discount applies to: the selected line, else the last. */
+  const discountTarget =
+    cart === null
+      ? undefined
+      : (cart.lines.find((line) => line.id === selectedLineId) ??
+        cart.lines[cart.lines.length - 1]);
+
+  const openPayment = (): void => {
+    if (cart === null || cart.lines.length === 0 || paymentOpen || completed !== null) {
+      return;
+    }
+    setPaymentError(null);
+    setPaymentOpen(true);
+  };
+
+  const openDiscount = (): void => {
+    if (cart === null || cart.lines.length === 0 || discountOpen || completed !== null) {
+      return;
+    }
+    setDiscountNeedsApproval(false);
+    setDiscountOpen(true);
+  };
+
+  const dismissCompletion = useCallback((): void => {
+    setCompleted(null);
+    focusScan();
+  }, [focusScan]);
+
+  const applyDiscount = (
+    kind: "percent" | "fixed",
+    value: number,
+    managerUsername?: string,
+    managerPin?: string,
+  ): void => {
+    if (cart === null || discountTarget === undefined || !beginWork()) {
+      return;
+    }
+    setDiscountBusy(true);
+    client
+      .draftApplyDiscount(cart.draft_id, discountTarget.id, kind, value, managerUsername, managerPin)
+      .then((next) => {
+        setDiscountOpen(false);
+        setDiscountNeedsApproval(false);
+        applyCart(next, discountTarget.id, t("sell.announce.discount"));
+      })
+      .catch((err: unknown) => {
+        if (errorCode(err) === DISCOUNT_NEEDS_APPROVAL) {
+          // Above the cashier's ceiling: the popover stays open and
+          // reveals the manager username + PIN fields for the retry.
+          setDiscountNeedsApproval(true);
+        } else {
+          setDiscountOpen(false);
+          setDiscountNeedsApproval(false);
+          setInlineMessage(t("sell.error.generic"));
+          focusScan();
+        }
+      })
+      .finally(() => {
+        setDiscountBusy(false);
+        endWork();
+      });
+  };
+
+  const completePayment = (tenderMinor: number): void => {
+    if (cart === null || !beginWork()) {
+      return;
+    }
+    setPaymentBusy(true);
+    const exponent = cart.currency_exponent;
+    client
+      .completeSaleCash(cart.draft_id, tenderMinor)
+      .then((dto) => {
+        setCompleted(dto);
+        setPaymentOpen(false);
+        setPaymentError(null);
+        announce(
+          t("sell.announce.completed", {
+            total: formatMoney(dto.total_minor, exponent),
+            change: formatMoney(dto.change_minor, exponent),
+          }),
+        );
+        // The sale cleared the cart: load the fresh draft, clear the
+        // stale selection, and return focus to the scan input.
+        setSelectedLineId(null);
+        setNewLineId(null);
+        void client.getCart().then((next) => {
+          setCart(next);
+        });
+        focusScan();
+      })
+      .catch(() => {
+        setPaymentError(t("sell.error.generic"));
+      })
+      .finally(() => {
+        setPaymentBusy(false);
+        endWork();
+      });
+  };
+
+  const reprint = (): void => {
+    if (completed === null || reprintBusy) {
+      return;
+    }
+    setReprintBusy(true);
+    client
+      .reprintReceipt(completed.sale_id)
+      .then((result) => {
+        setCompleted({ ...completed, receipt_queued: !result.printed });
+        if (result.printed) {
+          announce(t("sell.announce.reprinted"));
+        }
+      })
+      .catch(() => {
+        setInlineMessage(t("sell.error.generic"));
+        focusScan();
+      })
+      .finally(() => {
+        setReprintBusy(false);
+      });
+  };
+
   if (sessionLoading) {
     return (
       <div className="flex flex-1 items-center justify-center">
@@ -482,7 +641,7 @@ export function SellScreen({ client }: { client: CoreClient }): ReactElement {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="relative flex min-h-0 flex-1 flex-col">
       <div className="relative shrink-0 px-4 pt-4">
         {status?.dev_build === true ? (
           <DevBanner client={client} currencyExponent={cart.currency_exponent} />
@@ -501,6 +660,8 @@ export function SellScreen({ client }: { client: CoreClient }): ReactElement {
           onAdjustQty={adjustSelectedQty}
           onDelete={removeSelected}
           onRestore={restoreLine}
+          onPay={openPayment}
+          onDiscount={openDiscount}
           inputRef={inputRef}
         />
         {pendingQtyMilli !== null ? (
@@ -544,31 +705,78 @@ export function SellScreen({ client }: { client: CoreClient }): ReactElement {
       </div>
 
       <div className="mt-4 flex min-h-0 flex-1 border-t border-border">
-        <div className="flex min-h-0 flex-1 flex-col">
-          <CartTable
-            lines={cart.lines}
-            currencyExponent={cart.currency_exponent}
-            newLineId={newLineId}
-            onRowAnimationEnd={() => {
-              setNewLineId(null);
-            }}
-            selectedLineId={selectedLineId}
-            onSelect={(lineId) => {
-              setSelectedLineId(lineId);
-              focusScan();
-            }}
-            onRemove={removeLine}
-            motionTier={tier}
-          />
-        </div>
+        {completed !== null ? (
+          <div className="flex min-h-0 flex-1 flex-col items-center gap-3 overflow-y-auto p-4">
+            <p className="text-lg font-semibold">{t("sell.complete.title")}</p>
+            <ReceiptPreview
+              receipt={completed.receipt}
+              currencyExponent={cart.currency_exponent}
+              receiptQueued={completed.receipt_queued}
+              reprintBusy={reprintBusy}
+              onReprint={reprint}
+              onNewSale={dismissCompletion}
+            />
+          </div>
+        ) : (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <CartTable
+              lines={cart.lines}
+              currencyExponent={cart.currency_exponent}
+              newLineId={newLineId}
+              onRowAnimationEnd={() => {
+                setNewLineId(null);
+              }}
+              selectedLineId={selectedLineId}
+              onSelect={(lineId) => {
+                setSelectedLineId(lineId);
+                focusScan();
+              }}
+              onRemove={removeLine}
+              motionTier={tier}
+            />
+          </div>
+        )}
         <TotalsPanel
           totals={cart.totals}
           currencyExponent={cart.currency_exponent}
           motionTier={tier}
           cancelArmed={cancelArmed}
           onCancelClick={handleCancelClick}
+          canPay={cart.lines.length > 0}
+          onPayClick={openPayment}
+          onDiscountClick={openDiscount}
         />
       </div>
+
+      {paymentOpen ? (
+        <PaymentPanel
+          totalMinor={cart.totals.total_minor}
+          currencyExponent={cart.currency_exponent}
+          motionTier={tier}
+          busy={paymentBusy}
+          error={paymentError}
+          onComplete={completePayment}
+          onClose={() => {
+            setPaymentOpen(false);
+            setPaymentError(null);
+            focusScan();
+          }}
+        />
+      ) : null}
+      {discountOpen && discountTarget !== undefined ? (
+        <ManagerPinPopover
+          lineName={discountTarget.name}
+          currencyExponent={cart.currency_exponent}
+          needsApproval={discountNeedsApproval}
+          busy={discountBusy}
+          onApply={applyDiscount}
+          onClose={() => {
+            setDiscountOpen(false);
+            setDiscountNeedsApproval(false);
+            focusScan();
+          }}
+        />
+      ) : null}
 
       <StatusBar
         shiftOpen={status?.shift_open ?? false}
