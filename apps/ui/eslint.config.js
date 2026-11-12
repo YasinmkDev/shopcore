@@ -15,6 +15,17 @@ export default tseslint.config(
   // The config file itself is not part of the TS program; lint it without
   // type-aware rules.
   { files: ["eslint.config.js"], ...tseslint.configs.disableTypeChecked },
+  // The release-bundle verifier is a plain node script, not part of
+  // the TS program either; same treatment, plus `no-undef` off — its
+  // node globals (console, process, URL) are not in the browser env
+  // this config assumes, and node fails at runtime on a bad name.
+  {
+    files: ["scripts/verify-release-bundle.mjs"],
+    ...tseslint.configs.disableTypeChecked,
+    // Spread last would replace `rules` wholesale (the bug that kept
+    // `no-undef` on); merge instead.
+    rules: { ...tseslint.configs.disableTypeChecked.rules, "no-undef": "off" },
+  },
   reactHooks.configs.flat["recommended-latest"],
   jsxA11y.flatConfigs.recommended,
   {
@@ -22,5 +33,5 @@ export default tseslint.config(
     // event payload types land with the specs that emit them).
     rules: { "@typescript-eslint/no-empty-object-type": ["error", { allowInterfaces: "always" }] },
   },
-  { ignores: ["dist", "node_modules", "public"] },
+  { ignores: ["dist", "dist-e2e", "node_modules", "public"] },
 );

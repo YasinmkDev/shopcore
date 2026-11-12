@@ -5,12 +5,13 @@
  *
  * Two transports, one interface, so the UI is unaware of deployment mode:
  * - TauriClient: in-process commands/events (embedded mode).
- * - HttpClient: HTTP + WebSocket to a store hub (client mode; also used
- *   for browser-based e2e tests). Lands with the hub spec (Phase 5).
+ * - HttpClient: HTTP to the desktop's e2e shim (001c-2; the full hub
+ *   transport, with events, lands with the hub spec, Phase 5).
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { HttpClient } from "./http-client";
 import type {
   CartViewDto,
   HardwareStatusPayload,
@@ -182,71 +183,21 @@ export class TauriClient implements CoreClient {
   }
 }
 
-export class HttpClient implements CoreClient {
-  ping(): Promise<Pong> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
+/**
+ * The client for the current deployment mode. Embedded (Tauri) by
+ * default; the e2e build (`VITE_SHOPCORE_E2E=1`) talks to the
+ * desktop's shim instead — the shim URL + token come from the
+ * preview URL's query (`?shim=<url>&token=<token>`), which the
+ * Playwright global setup writes. The flag is a build-time constant,
+ * so Rollup tree-shakes the `HttpClient` import out of the release
+ * bundle (`verify-release-bundle.mjs` proves it).
+ */
+function createCoreClient(): CoreClient {
+  if (import.meta.env.VITE_SHOPCORE_E2E === "1") {
+    const params = new URLSearchParams(window.location.search);
+    return new HttpClient(params.get("shim") ?? "", params.get("token") ?? "");
   }
-
-  getSession(): Promise<SessionDto | null> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
-  }
-
-  getStatus(): Promise<StatusDto> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
-  }
-
-  listSampleBarcodes(): Promise<SampleBarcodeDto[]> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
-  }
-
-  getCart(): Promise<CartViewDto> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
-  }
-
-  searchSkus(): Promise<SkuHitDto[]> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
-  }
-
-  lookupBarcode(): Promise<SkuHitDto> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
-  }
-
-  draftAddLine(): Promise<CartViewDto> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
-  }
-
-  draftSetQty(): Promise<CartViewDto> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
-  }
-
-  draftRemoveLine(): Promise<CartViewDto> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
-  }
-
-  draftCancel(): Promise<CartViewDto> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
-  }
-
-  draftRestoreLine(): Promise<CartViewDto> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
-  }
-
-  draftApplyDiscount(): Promise<CartViewDto> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
-  }
-
-  completeSaleCash(): Promise<SaleCompletedDto> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
-  }
-
-  reprintReceipt(): Promise<ReprintDto> {
-    return Promise.reject(new Error("HttpClient is not implemented yet (hub spec, Phase 5)"));
-  }
-
-  subscribe(): () => void {
-    throw new Error("HttpClient is not implemented yet (hub spec, Phase 5)");
-  }
+  return new TauriClient();
 }
 
-/** The client for the current deployment mode (embedded in spec 000). */
-export const coreClient: CoreClient = new TauriClient();
+export const coreClient: CoreClient = createCoreClient();

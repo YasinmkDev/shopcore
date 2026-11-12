@@ -39,6 +39,29 @@ build:
 build-dev:
     ../../../apps/ui/node_modules/.bin/tauri build --features dev-session --config tauri.dev.conf.json
 
+# Spec 001c-2: prove the release UI bundle contains no e2e-shim
+# markers — the VITE_SHOPCORE_E2E flag strips HttpClient at build
+# time, so the release bundle must not contain the shim URL, the
+# token header, or the token plumbing. Runs in CI (build-windows).
+check-release-bundle:
+    pnpm --filter @shopcore/ui run build
+    node apps/ui/scripts/verify-release-bundle.mjs
+
+# Spec 001c-2: Playwright e2e — builds the e2e UI bundle
+# (`VITE_SHOPCORE_E2E=1` → dist-e2e) and the desktop with
+# `e2e-shim` + `dev-session`, then runs the checkout spec against
+# the live shim. On Linux the harness wraps the desktop in
+# `xvfb-run` (no real display needed).
+[working-directory: 'crates/desktop/src-tauri']
+e2e:
+    VITE_SHOPCORE_E2E=1 pnpm --filter @shopcore/ui run build
+    ../../../apps/ui/node_modules/.bin/tauri build --features e2e-shim,dev-session --config tauri.dev.conf.json
+    # `pnpm --filter` runs the command in the package dir
+    # (`apps/ui`), so the config path is relative to there — NOT to
+    # this recipe's working directory (the `../../../` form resolved
+    # one level above the repo and failed before any test ran).
+    pnpm --filter @shopcore/ui exec playwright test --config playwright.config.ts
+
 # Full gate. Must exit 0 before any work is considered done.
 check:
     cargo fmt --all -- --check

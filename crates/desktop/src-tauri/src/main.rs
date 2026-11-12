@@ -22,6 +22,9 @@
 //! `reprint_receipt`. The e2e shim (also 001c-2, `e2e.rs`) calls the
 //! same `*_impl` functions — one dispatch table, no second API.
 
+#[cfg(feature = "e2e-shim")]
+mod e2e;
+
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -1048,6 +1051,18 @@ fn main() {
         .setup(|app| {
             let state = build_app_state(app.handle())?;
             app.manage(state);
+            // The e2e shim (001c-2, amendment 1): serves HTTP on
+            // 127.0.0.1 only, behind a per-run token. Spawned, never
+            // awaited — a shim failure must not block the till.
+            #[cfg(feature = "e2e-shim")]
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(err) = crate::e2e::serve_shim(handle).await {
+                        eprintln!("e2e shim failed: {err}");
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1662,7 +1677,7 @@ mod tests {
         (AppState::new(core, Some(session)), dir)
     }
 
-    /// With `dev-session` the command lists the 6 seeded sample
+    /// With `dev-session` the command lists the 7 seeded sample
     /// barcodes with prices and tax modes, and the status flags the
     /// build as a dev build.
     #[test]
@@ -1671,7 +1686,7 @@ mod tests {
         let (state, _dir) = dev_seed_app();
         assert!(get_status_impl(&state).expect("status").dev_build);
         let rows = list_sample_barcodes_impl(&state).expect("sample barcodes");
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 7);
         let milk = rows
             .iter()
             .find(|row| row.barcode == "1234567890123")
@@ -1938,5 +1953,78 @@ mod tests {
             })
             .expect("audit count");
         assert_eq!(reprints, 1);
+    }
+
+    /// Spec 001c-2, amendment 1 (d): the shim's dispatch table routes
+    /// to the same `*_impl` functions — a full sale through `dispatch`
+    /// (the 52.32 / 60.00 / 7.68 acceptance), plus an unknown command
+    /// (`NOT_FOUND`) and missing args (`INVALID_INPUT`).
+    #[cfg(feature = "e2e-shim")]
+    #[tokio::test]
+    async fn e2e_dispatch_round_trips_a_sale() {
+        let app = TestApp::with_sale_till();
+        let cart = crate::e2e::dispatch(&app.state, "get_cart", serde_json::Value::Null)
+            .await
+            .expect("get_cart");
+        let draft_id = cart
+            .get("draft_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("draft id")
+            .to_string();
+        let view = crate::e2e::dispatch(
+            &app.state,
+            "draft_add_line",
+            serde_json::json!({
+                "draft_id": draft_id,
+                "sku_id": app.sku_tst44_id.clone(),
+                "qty_milli": 1000,
+                "unit_price_e4": 443_400,
+            }),
+        )
+        .await
+        .expect("add line");
+        assert_eq!(
+            view.get("totals")
+                .and_then(|totals| totals.get("total_minor"))
+                .and_then(serde_json::Value::as_i64),
+            Some(5_232)
+        );
+        let completed = crate::e2e::dispatch(
+            &app.state,
+            "complete_sale_cash",
+            serde_json::json!({"draft_id": draft_id, "tender_minor": 6_000}),
+        )
+        .await
+        .expect("complete");
+        assert_eq!(
+            completed
+                .get("total_minor")
+                .and_then(serde_json::Value::as_i64),
+            Some(5_232)
+        );
+        assert_eq!(
+            completed
+                .get("change_minor")
+                .and_then(serde_json::Value::as_i64),
+            Some(768)
+        );
+        assert_eq!(
+            completed
+                .get("receipt_queued")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        let err = crate::e2e::dispatch(&app.state, "no_such_command", serde_json::Value::Null)
+            .await
+            .expect_err("unknown command must fail");
+        assert_eq!(err.code, "NOT_FOUND");
+        let err = crate::e2e::dispatch(
+            &app.state,
+            "complete_sale_cash",
+            serde_json::json!({"draft_id": draft_id}),
+        )
+        .await
+        .expect_err("missing tender must fail");
+        assert_eq!(err.code, "INVALID_INPUT");
     }
 }

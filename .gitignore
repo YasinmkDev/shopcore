@@ -4,6 +4,12 @@
 crates/bench/target/
 node_modules
 dist
+dist-e2e
+# Playwright e2e harness (spec 001c-2): per-run auth + process files.
+apps/ui/e2e/auth.json
+apps/ui/e2e/.processes.json
+apps/ui/e2e/.tmp-data/
 crates/desktop/src-tauri/gen
 *.log
 .DS_Store
+apps/ui/test-results/

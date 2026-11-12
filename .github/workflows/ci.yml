@@ -93,6 +93,13 @@ jobs:
       - name: Run desktop tests with dev-session feature
         run: cargo nextest run -p shopcore-desktop --features dev-session
 
+      # Spec 001c-2, amendment 1 (e): the e2e shim is behind the
+      # `e2e-shim` cargo feature. Feature-gated code must compile
+      # and its dispatch tests must run in CI. The release-absence
+      # half lives in the build-windows job (binary grep).
+      - name: Run desktop tests with e2e-shim feature
+        run: cargo nextest run -p shopcore-desktop --features e2e-shim
+
       - name: Check generated types are fresh
         run: |
           just gen-types
@@ -194,12 +201,23 @@ jobs:
       # are too short/generic to grep for reliably). The test DB key
       # string (test-key-32-bytes-long-0123456789) is unique, so it is
       # grepped directly — it must never reach a release build either.
-      - name: Verify dev-seed marker and test key are absent from release binary
+      # Spec 001c-2, amendment 1 (e): the same applies to the e2e
+      # shim marker (SHOPCORE_E2E_SHIM_V1) — the `e2e-shim` feature
+      # must never be enabled in a release build.
+      - name: Verify dev-seed marker, test key, and e2e-shim marker are absent from release binary
         run: |
           $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes("target/release/shopcore-desktop.exe"))
           if ($text.Contains("SHOPCORE_DEV_SEED_MARKER_V1")) { throw "dev-seed marker found in release binary — the dev-seed feature leaked into a release build" }
           if ($text.Contains("test-key-32-bytes-long-0123456789")) { throw "test DB key found in release binary — a test key leaked into a release build" }
-          Write-Host "dev-seed marker and test DB key absent from release binary"
+          if ($text.Contains("SHOPCORE_E2E_SHIM_V1")) { throw "e2e-shim marker found in release binary — the e2e-shim feature leaked into a release build" }
+          Write-Host "dev-seed marker, test DB key, and e2e-shim marker absent from release binary"
+
+      # Spec 001c-2: the release UI bundle must contain no e2e-shim
+      # markers (the VITE_SHOPCORE_E2E flag strips HttpClient at
+      # build time). `just build` above already built the release
+      # bundle; this rebuilds + greps it.
+      - name: Verify release UI bundle contains no e2e-shim markers
+        run: just check-release-bundle
 
       - name: Upload Windows exe + installer
         uses: actions/upload-artifact@v4
@@ -370,3 +388,63 @@ jobs:
 
       - name: Run sync chaos tests (Postgres required, no silent skip)
         run: cargo nextest run -p shopcore-server --test chaos
+
+  e2e:
+    # Spec 001c-2: Playwright checkout flow against the REAL desktop
+    # binary (e2e-shim + dev-session features) and the e2e UI build.
+    # Runs only when `check` is green. Windows: GUI apps run on
+    # windows-latest runners, so the desktop opens its window there
+    # (no xvfb needed — the harness only wraps it on Linux).
+    needs: check
+    runs-on: windows-latest
+    # ADR-022: same Strawberry Perl pin as the check job (vendored OpenSSL).
+    env:
+      OPENSSL_SRC_PERL: 'C:\Strawberry\perl\bin\perl.exe'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Put Strawberry Perl first on PATH
+        run: |
+          if (-not (Test-Path "C:\Strawberry\perl\bin\perl.exe")) { throw "Strawberry Perl not found at C:\Strawberry\perl\bin" }
+          Add-Content $env:GITHUB_PATH "C:\Strawberry\perl\bin"
+          perl -v | Select-Object -First 2
+
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Node 22.23.4
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.4"
+
+      - name: Install pnpm 12.18.0
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
+
+      - name: Install just 1.59.0
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.59.0
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        run: pnpm --filter @shopcore/ui exec playwright install chromium
+
+      - name: Run Playwright e2e (builds e2e UI + desktop, runs checkout spec)
+        run: just e2e
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/ui/playwright-report

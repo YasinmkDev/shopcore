@@ -19,6 +19,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# axum is OPTIONAL (001c-2): only the `e2e-shim` feature serves HTTP
+# (the Playwright shim). The release graph must NOT contain axum —
+# proven by `cargo tree` and the CI release-absence grep.
+axum = { workspace = true, optional = true }
 shopcore-core = { workspace = true }
 shopcore-db = { path = "../../db", version = "0.1.0" }
 # shopcore-domain at the IPC boundary (001c-2): the desktop parses the
@@ -38,6 +42,12 @@ uuid = { workspace = true }
 # release binary for the seed marker (see .github/workflows/ci.yml).
 # `just dev` enables it; `just build` does not.
 dev-session = ["shopcore-core/dev-seed"]
+# The Playwright e2e shim (spec 001c-2, amendment 1, option A):
+# serves HTTP on 127.0.0.1 only, behind a per-run token, dispatching
+# to the same `*_impl` functions as the Tauri commands. NEVER enabled
+# in a release build — CI greps the release binary for the shim
+# marker (see .github/workflows/ci.yml).
+e2e-shim = ["dep:axum"]
 
 [build-dependencies]
 # Standard layout since 2026-11-10: Cargo.toml sits in src-tauri/ next to
