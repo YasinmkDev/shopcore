@@ -12,6 +12,7 @@
 //! permissions, settings, and the dev seed.
 
 pub mod audit;
+pub mod core;
 pub mod draft;
 pub mod error;
 pub mod permissions;
@@ -25,6 +26,7 @@ pub mod settings;
 pub mod users;
 
 pub use audit::{AuditEvent, verify_audit_chain};
+pub use core::Core;
 pub use draft::{DraftCart, DraftLine};
 pub use error::CoreError;
 pub use sale::{CompleteSaleCashInput, SaleCompleted, SaleError};
