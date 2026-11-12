@@ -100,6 +100,7 @@ fn lockout_after_five_failures_for_five_minutes_then_unlocks() {
 fn unknown_username_path_is_structurally_and_temporally_indistinguishable() {
     use shopcore_core::pin::{dummy_hash_verify_count, reset_dummy_hash_verify_count};
 
+    const PAIRS: usize = 15;
     let db = fresh_db();
     make_user(&db, "cashier", "1234", &["sale.create"]);
 
@@ -127,7 +128,6 @@ fn unknown_username_path_is_structurally_and_temporally_indistinguishable() {
     assert_eq!(dummy_hash_verify_count(), 2);
 
     // --- Timing sanity: median of 15 alternating pairs, 25% floor. ---
-    const PAIRS: usize = 15;
     let mut known: Vec<u128> = Vec::with_capacity(PAIRS);
     let mut unknown: Vec<u128> = Vec::with_capacity(PAIRS);
     for _ in 0..PAIRS {
