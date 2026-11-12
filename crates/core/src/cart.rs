@@ -39,6 +39,10 @@ pub struct PricedCart {
     pub subtotal_minor: i64,
     /// Sum of line discounts.
     pub discount_minor: i64,
+    /// Sum of line nets after line discounts and bill-discount
+    /// allocation (the domain's bill net). `net_subtotal + tax ==
+    /// total` in every tax mode.
+    pub net_subtotal_minor: i64,
     /// Sum of line taxes.
     pub tax_minor: i64,
     /// Sum of line totals.
@@ -146,6 +150,7 @@ pub fn price_draft_cart(db: &Db, draft: &DraftCart) -> Result<PricedCart, CoreEr
         // Bill discounts land in 001c-2; the bill discount here is
         // always `None`, so the discount total is the line discounts.
         discount_minor: cart.line_discounts.minor(),
+        net_subtotal_minor: cart.net.minor(),
         tax_minor: cart.tax.minor(),
         total_minor: cart.total.minor(),
         currency_exponent,

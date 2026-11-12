@@ -250,6 +250,76 @@ fn missing_tax_group_is_an_error_not_a_silent_exempt() {
 }
 
 #[test]
+fn cart_totals_carry_net_subtotal_in_all_tax_modes() {
+    // 02 "Totals display": the DTO carries net_subtotal (the bill
+    // net) and `net_subtotal + tax == total` in every mode. The
+    // displayed pre-tax subtotal (`net_subtotal + discounts`) then
+    // satisfies `subtotal - discounts + tax == total` in both modes.
+    // The GROSS subtotal satisfies that equation only for exclusive
+    // lines — for inclusive lines the gross already contains the tax
+    // (11800 - 0 + 1800 = 13600 != 11800), which is why the label
+    // must say "tax included" for a gross display.
+    // Exclusive: net 100.00, tax 18.00, total 118.00.
+    let fx = CartFixture::new("cart-net-exclusive");
+    fx.add(&fx.exc_sku, 1_000, 1_000_000);
+    let draft = shopcore_core::draft::load_draft(&fx.scratch, &fx.draft_id)
+        .unwrap()
+        .unwrap();
+    let priced = price_draft_cart(&fx.db, &draft).unwrap();
+    assert_eq!(priced.net_subtotal_minor, 10_000);
+    assert_eq!(
+        priced.net_subtotal_minor + priced.tax_minor,
+        priced.total_minor
+    );
+    assert_eq!(
+        priced.subtotal_minor - priced.discount_minor + priced.tax_minor,
+        priced.total_minor,
+        "the gross equation holds for exclusive lines"
+    );
+    // Inclusive: gross 118.00, net 100.00, tax 18.00.
+    let fx = CartFixture::new("cart-net-inclusive");
+    fx.add(&fx.inc_sku, 1_000, 1_180_000);
+    let draft = shopcore_core::draft::load_draft(&fx.scratch, &fx.draft_id)
+        .unwrap()
+        .unwrap();
+    let priced = price_draft_cart(&fx.db, &draft).unwrap();
+    assert_eq!(priced.subtotal_minor, 11_800);
+    assert_eq!(priced.net_subtotal_minor, 10_000);
+    assert_eq!(
+        priced.net_subtotal_minor + priced.tax_minor,
+        priced.total_minor
+    );
+    assert_eq!(
+        (priced.net_subtotal_minor + priced.discount_minor) - priced.discount_minor
+            + priced.tax_minor,
+        priced.total_minor,
+        "the pre-tax subtotal satisfies the equation for inclusive lines"
+    );
+    assert_ne!(
+        priced.subtotal_minor - priced.discount_minor + priced.tax_minor,
+        priced.total_minor,
+        "the GROSS subtotal does NOT satisfy the equation for inclusive lines"
+    );
+    // Mixed: exclusive 100.00 + inclusive 118.00 → net 200.00,
+    // tax 36.00, total 236.00.
+    let fx = CartFixture::new("cart-net-mixed");
+    fx.add(&fx.exc_sku, 1_000, 1_000_000);
+    fx.add(&fx.inc_sku, 1_000, 1_180_000);
+    let draft = shopcore_core::draft::load_draft(&fx.scratch, &fx.draft_id)
+        .unwrap()
+        .unwrap();
+    let priced = price_draft_cart(&fx.db, &draft).unwrap();
+    assert_eq!(priced.subtotal_minor, 21_800);
+    assert_eq!(priced.net_subtotal_minor, 20_000);
+    assert_eq!(
+        priced.net_subtotal_minor + priced.tax_minor,
+        priced.total_minor
+    );
+    assert_eq!(priced.tax_minor, 3_600);
+    assert_eq!(priced.total_minor, 23_600);
+}
+
+#[test]
 fn open_shift_id_reads_the_open_shift() {
     let fx = CartFixture::new("cart-shift");
     // No shift row yet: none open.

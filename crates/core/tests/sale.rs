@@ -1347,6 +1347,41 @@ fn replay_with_a_different_tender_returns_the_original_sale() {
     );
 }
 
+#[test]
+fn replay_of_an_inclusive_sale_has_no_spurious_rounding_line() {
+    // The replay paths used to compute the rounding line from the
+    // GROSS equation `total - (subtotal - discount + tax)`: for an
+    // inclusive sale with rounding OFF that is `-tax` — a spurious
+    // "Cash rounding: -1800" footer line on the rebuilt receipt.
+    // The rounding line now comes from the net:
+    // `total - (net_subtotal + tax)`, and the rebuilt receipt carries
+    // the net subtotal.
+    let fx = Fixture::new("replay-inclusive");
+    let draft_id = fx.draft_with(&[("TST118", 1_000)]);
+    let first = fx.complete(&draft_id, 11_800).unwrap();
+    assert_eq!(first.total_minor, 11_800);
+    assert_eq!(first.rounding_line_minor, 0);
+    assert_eq!(first.print_doc.subtotal_minor, 11_800);
+    assert_eq!(first.print_doc.net_subtotal_minor, 10_000);
+    assert_eq!(first.print_doc.tax_minor, 1_800);
+    let second = fx.complete(&draft_id, 11_800).unwrap();
+    assert!(
+        second.already_completed(),
+        "the second call is a replay, not a new sale"
+    );
+    assert_eq!(second.sale_id, first.sale_id);
+    assert_eq!(
+        second.rounding_line_minor, 0,
+        "a replayed inclusive sale must not invent a rounding line"
+    );
+    assert_eq!(second.print_doc.net_subtotal_minor, 10_000);
+    assert_eq!(
+        second.print_doc.net_subtotal_minor + second.print_doc.tax_minor,
+        second.print_doc.total_minor,
+        "the rebuilt receipt satisfies net_subtotal + tax == total"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Draft cart
 // ---------------------------------------------------------------------------

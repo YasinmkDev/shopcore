@@ -329,6 +329,7 @@ impl AppState {
         for total in [
             priced.subtotal_minor,
             priced.discount_minor,
+            priced.net_subtotal_minor,
             priced.tax_minor,
             priced.total_minor,
         ] {
@@ -340,6 +341,7 @@ impl AppState {
             totals: CartTotalsDto {
                 subtotal_minor: priced.subtotal_minor,
                 discount_minor: priced.discount_minor,
+                net_subtotal_minor: priced.net_subtotal_minor,
                 tax_minor: priced.tax_minor,
                 total_minor: priced.total_minor,
             },
@@ -1058,6 +1060,7 @@ mod tests {
         let line = view.lines.first().expect("line");
         assert_eq!(line.name, "Test 100");
         assert_eq!(view.totals.subtotal_minor, 10_000);
+        assert_eq!(view.totals.net_subtotal_minor, 10_000);
         assert_eq!(view.totals.tax_minor, 1_800);
         assert_eq!(view.totals.total_minor, 11_800);
         // A second scan of the same SKU merges into qty 2.

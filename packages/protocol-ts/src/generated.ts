@@ -94,6 +94,14 @@ subtotal_minor: number,
  */
 discount_minor: number, 
 /**
+ * Sum of line nets after line discounts and bill-discount
+ * allocation — the pre-tax subtotal. `net_subtotal + tax ==
+ * total` in every tax mode (exclusive, inclusive, mixed); see
+ * the totals-display rule in `context/02-domain-model.md`.
+ * The UI never computes money: it displays this value as given.
+ */
+net_subtotal_minor: number, 
+/**
  * Sum of line taxes.
  */
 tax_minor: number, 

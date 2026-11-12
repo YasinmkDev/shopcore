@@ -39,6 +39,31 @@ Golden examples (must exist as tests):
 
 Multiple taxes (compound or additive) are configured per tax group; default additive. Each tax component is rounded separately (`tax_i = round(net × rate_i)`); the line tax is the sum of the rounded components. Exclusive taxes round per component, so the line tax MAY DIFFER BY A CENT from rounding the combined rate once — that is the documented behaviour, not a bug. **Inclusive multi-rate split:** the net is derived from the COMBINED rate (`net = round(gross / (1 + sum(rate_i)))`), so net + tax always equals the gross; the total tax is then split across the components by rate via largest remainder, so the components sum exactly to the total tax. (Golden: 118.00 @5%+13% inclusive → net 100.00, tax 18.00, components 5.00 + 13.00.) Inclusive taxes derive the components FROM THE TOTAL tax (see the split above), not by rounding each component from the net. Ties in the largest-remainder split go to the component LISTED FIRST (in the tax group's rate order). Some markets MANDATE a rounding method (per-component, combined, or round-half-even); a per-tax-group rounding setting is a possible later addition, tracked under the fiscal research item. Tax-exempt customers/items set tax to 0 with an audit-visible reason.
 
+## Totals display (TotalsPanel + receipt — 001c-1 follow-up)
+The cart/sale DTOs carry two subtotals. `subtotal` is the sum of line
+GROSSES (shelf prices). `net_subtotal` is the sum of line NETS after
+line discounts and bill-discount allocation (the domain's bill net).
+- **Invariant: `net_subtotal + tax == total` in every tax mode**
+  (exclusive, inclusive, mixed) — each line's `net + tax == total`,
+  so the bill sums hold exactly. The cash-rounding line, when on, is
+  the only extra term: `total == net_subtotal + tax + rounding`.
+- **Display rule (governs 001c-2's TotalsPanel and the receipt):**
+  the numbers shown must satisfy
+  `displayed subtotal − discounts + tax == total` in BOTH tax modes.
+  The way to satisfy it is to display the PRE-TAX subtotal
+  (`net_subtotal + discounts`) as the subtotal line. The alternative
+  presentation — displaying the GROSS (shelf-price) subtotal —
+  satisfies the equation only when every line is exclusive; for any
+  inclusive line the gross already contains the tax, so that
+  presentation MUST label the subtotal line "tax included" (the tax
+  shown is the tax inside the subtotal, not an addition). A mixed cart
+  shown with a gross subtotal labels the subtotal "tax included" for
+  the inclusive portion.
+- The UI never computes money: both subtotals come from the core in
+  the DTO (`CartTotalsDto.net_subtotal_minor`, `PrintDoc.net_subtotal_minor`).
+  The receipt's rounding line is likewise derived from the net, never
+  from the gross equation: `rounding == total − (net_subtotal + tax)`.
+
 ## Promotions (v1)
 Types: percent off item/category, fixed amount off, buy X get Y (cheapest or specified free), bundle price, time-windowed, customer-group restricted. Rules:
 - Evaluated by the domain crate as pure functions over (cart, promo set, time injected).
@@ -92,3 +117,4 @@ Types: percent off item/category, fixed amount off, buy X get Y (cheapest or spe
 3. After any sequence of movements, `balance == sum(movements)` per (branch, sku).
 4. Replaying the same sync batch twice produces identical state (idempotency).
 5. A completed sale cannot be altered; totals recomputed by the server equal the till's totals.
+6. For any cart or sale, `net_subtotal + tax == total` in every tax mode (exclusive, inclusive, mixed); the displayed `subtotal − discounts + tax == total` holds when the displayed subtotal is the pre-tax subtotal (`net_subtotal + discounts`), and a gross subtotal is labelled "tax included" whenever any line is inclusive (see "Totals display" above).

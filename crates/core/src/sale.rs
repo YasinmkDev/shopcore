@@ -31,7 +31,7 @@
 
 use std::fmt::Write;
 
-use rusqlite::{OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use shopcore_db::Db;
 use shopcore_domain::{
     BillDiscount, CartResult, CashRounding, LineDiscount, LineInput, Money, Qty, UnitPrice,
@@ -407,6 +407,7 @@ fn build_print_doc(
     receipt_no: &str,
     lines: &[PrintLine],
     subtotal_minor: i64,
+    net_subtotal_minor: i64,
     tax_minor: i64,
     total_minor: i64,
     tender_minor: i64,
@@ -424,6 +425,7 @@ fn build_print_doc(
         ],
         lines: lines.to_vec(),
         subtotal_minor,
+        net_subtotal_minor,
         tax_minor,
         total_minor,
         payments: vec![PrintPayment {
@@ -1124,6 +1126,7 @@ fn queue_sale_print_job(
         receipt_no,
         print_lines,
         priced.cart.subtotal.minor(),
+        priced.cart.net.minor(),
         priced.cart.tax.minor(),
         priced.total_minor,
         ctx.tender_minor,
@@ -1195,6 +1198,33 @@ fn sale_payload_json(
     )
 }
 
+/// Bill net of a completed sale, from its stored lines: each line's
+/// total is `net + tax`, so `Σ(line total − line tax)` is the bill
+/// net in every tax mode. The replay paths rebuild the receipt from
+/// the stored rows (the `sale` row stores the gross subtotal only —
+/// the net is not a column), and the net is NOT
+/// `subtotal − discount − tax`: that equation holds only for
+/// exclusive lines (for inclusive lines the gross already contains
+/// the tax). The rounding line is therefore
+/// `total − (net_subtotal + tax)`, never
+/// `total − (subtotal − discount + tax)`.
+///
+/// # Errors
+///
+/// Returns [`shopcore_db::DbError`] if the read fails.
+fn load_sale_net_subtotal(
+    conn: &Connection,
+    tenant_id: &str,
+    sale_id: &str,
+) -> Result<i64, shopcore_db::DbError> {
+    let net: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(total_minor - tax_minor), 0) FROM sale_line WHERE tenant_id = ?1 AND sale_id = ?2 AND deleted_at IS NULL",
+        rusqlite::params![tenant_id, sale_id],
+        |row| row.get(0),
+    )?;
+    Ok(net)
+}
+
 /// The pre-transaction twin of [`load_completed_sale`]: rebuild a
 /// completed sale's output from the actor's read pool (used by the
 /// idempotent replay in [`complete_sale_cash`] — the draft is already
@@ -1230,7 +1260,7 @@ fn replay_completed_sale(
             .map_err(shopcore_db::DbError::Sql)
         }
     })?;
-    let Some((receipt_no, subtotal, discount, tax, total)) = row else {
+    let Some((receipt_no, subtotal, _discount, tax, total)) = row else {
         return Err(SaleError::NotFound(format!(
             "sale {sale_id} does not exist"
         )));
@@ -1250,7 +1280,17 @@ fn replay_completed_sale(
     })?
     .unwrap_or(0);
     let change_minor = tender - total;
-    let rounding_line_minor = total - (subtotal - discount + tax);
+    // The rounding line comes from the NET subtotal (see
+    // `load_sale_net_subtotal`): the gross equation
+    // `total - (subtotal - discount + tax)` is wrong for inclusive
+    // lines — it reports a spurious `-tax` rounding line on a sale
+    // with rounding off.
+    let net_subtotal = {
+        let tenant_id = tenant_id.clone();
+        let sale_id = sale_id.clone();
+        db.read(move |conn| load_sale_net_subtotal(conn, &tenant_id, &sale_id))?
+    };
+    let rounding_line_minor = total - (net_subtotal + tax);
     let print_lines = load_replay_print_lines(db, &tenant_id, &sale_id)?;
     let (print_job_id, receipt_queued): (String, bool) = db
         .read({
@@ -1277,6 +1317,7 @@ fn replay_completed_sale(
         &receipt_no,
         &print_lines,
         subtotal,
+        net_subtotal,
         tax,
         total,
         tender,
@@ -1346,7 +1387,7 @@ fn load_completed_sale(
             },
         )
         .optional()?;
-    let Some((sale_id, receipt_no, subtotal, discount, tax, total)) = row else {
+    let Some((sale_id, receipt_no, subtotal, _discount, tax, total)) = row else {
         return Ok(None);
     };
     let tender: i64 = tx
@@ -1358,7 +1399,11 @@ fn load_completed_sale(
         .optional()?
         .unwrap_or(0);
     let change_minor = tender - total;
-    let rounding_line_minor = total - (subtotal - discount + tax);
+    // The rounding line comes from the NET subtotal (see
+    // `load_sale_net_subtotal`): the gross equation is wrong for
+    // inclusive lines (spurious `-tax` rounding line).
+    let net_subtotal = load_sale_net_subtotal(tx, &ctx.tenant_id, &sale_id)?;
+    let rounding_line_minor = total - (net_subtotal + tax);
     let mut stmt = tx.prepare(
         "SELECT l.qty_milli, l.unit_price_e4, l.total_minor, s.name FROM sale_line l JOIN sku s ON s.id = l.sku_id WHERE l.tenant_id = ?1 AND l.sale_id = ?2 ORDER BY l.rowid ASC",
     )?;
@@ -1392,6 +1437,7 @@ fn load_completed_sale(
         &receipt_no,
         &print_lines,
         subtotal,
+        net_subtotal,
         tax,
         total,
         tender,

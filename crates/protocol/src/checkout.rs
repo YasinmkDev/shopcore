@@ -61,6 +61,13 @@ pub struct CartTotalsDto {
     /// Sum of line discounts.
     #[ts(type = "number")]
     pub discount_minor: i64,
+    /// Sum of line nets after line discounts and bill-discount
+    /// allocation — the pre-tax subtotal. `net_subtotal + tax ==
+    /// total` in every tax mode (exclusive, inclusive, mixed); see
+    /// the totals-display rule in `context/02-domain-model.md`.
+    /// The UI never computes money: it displays this value as given.
+    #[ts(type = "number")]
+    pub net_subtotal_minor: i64,
     /// Sum of line taxes.
     #[ts(type = "number")]
     pub tax_minor: i64,
@@ -180,6 +187,10 @@ mod tests {
         assert!(
             totals.contains("total_minor: number"),
             "CartTotalsDto.total_minor must export as number: {totals}"
+        );
+        assert!(
+            totals.contains("net_subtotal_minor: number"),
+            "CartTotalsDto.net_subtotal_minor must export as number: {totals}"
         );
         let view =
             CartViewDto::export_to_string(&ts_rs::Config::default()).expect("export CartViewDto");

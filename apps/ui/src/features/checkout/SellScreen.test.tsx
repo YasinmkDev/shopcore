@@ -77,9 +77,16 @@ const SESSION: SessionDto = {
 
 function totalsFor(lines: CartLineDto[]): CartTotalsDto {
   const subtotal = lines.reduce((sum, line) => sum + line.line_total_minor, 0);
-  // The fake prices exclusive 18% tax (STD group).
+  // The fake prices exclusive 18% tax (STD group), so the gross
+  // subtotal IS the net subtotal here.
   const tax = Math.round((subtotal * 18) / 100);
-  return { subtotal_minor: subtotal, discount_minor: 0, tax_minor: tax, total_minor: subtotal + tax };
+  return {
+    subtotal_minor: subtotal,
+    discount_minor: 0,
+    net_subtotal_minor: subtotal,
+    tax_minor: tax,
+    total_minor: subtotal + tax,
+  };
 }
 
 /** An error carrying the Rust side's stable error code. */
