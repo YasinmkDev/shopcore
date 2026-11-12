@@ -408,6 +408,7 @@ fn build_print_doc(
     lines: &[PrintLine],
     subtotal_minor: i64,
     net_subtotal_minor: i64,
+    discount_minor: i64,
     tax_minor: i64,
     total_minor: i64,
     tender_minor: i64,
@@ -426,6 +427,7 @@ fn build_print_doc(
         lines: lines.to_vec(),
         subtotal_minor,
         net_subtotal_minor,
+        discount_minor,
         tax_minor,
         total_minor,
         payments: vec![PrintPayment {
@@ -1127,6 +1129,7 @@ fn queue_sale_print_job(
         print_lines,
         priced.cart.subtotal.minor(),
         priced.cart.net.minor(),
+        priced.cart.line_discounts.minor() + priced.cart.bill_discount.minor(),
         priced.cart.tax.minor(),
         priced.total_minor,
         ctx.tender_minor,
@@ -1260,7 +1263,7 @@ fn replay_completed_sale(
             .map_err(shopcore_db::DbError::Sql)
         }
     })?;
-    let Some((receipt_no, subtotal, _discount, tax, total)) = row else {
+    let Some((receipt_no, subtotal, discount, tax, total)) = row else {
         return Err(SaleError::NotFound(format!(
             "sale {sale_id} does not exist"
         )));
@@ -1318,6 +1321,7 @@ fn replay_completed_sale(
         &print_lines,
         subtotal,
         net_subtotal,
+        discount,
         tax,
         total,
         tender,
@@ -1387,7 +1391,7 @@ fn load_completed_sale(
             },
         )
         .optional()?;
-    let Some((sale_id, receipt_no, subtotal, _discount, tax, total)) = row else {
+    let Some((sale_id, receipt_no, subtotal, discount, tax, total)) = row else {
         return Ok(None);
     };
     let tender: i64 = tx
@@ -1438,6 +1442,7 @@ fn load_completed_sale(
         &print_lines,
         subtotal,
         net_subtotal,
+        discount,
         tax,
         total,
         tender,

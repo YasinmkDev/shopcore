@@ -15,11 +15,12 @@ pub mod sync;
 pub mod time;
 
 pub use checkout::{
-    CartLineDto, CartTotalsDto, CartViewDto, HardwareStatusPayload, SaleCompletedPayload,
-    SampleBarcodeDto, SessionDto, SkuHitDto, StatusDto,
+    CartLineDto, CartTotalsDto, CartViewDto, HardwareStatusPayload, ReceiptDto, ReceiptLineDto,
+    ReceiptPaymentDto, SaleCompletedDto, SaleCompletedPayload, SampleBarcodeDto, SessionDto,
+    SkuHitDto, StatusDto,
 };
 pub use sync::{Cursor, OutboxRow, PriceListEntry, PullResponse, SyncAck, SyncBatch, Tombstone};
-pub use time::{from_iso8601, to_iso8601};
+pub use time::{from_iso8601, to_iso8601, yyyymmdd_utc};
 
 /// Response to the `ping` command. Proves the UI → Rust round-trip.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

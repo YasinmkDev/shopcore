@@ -196,6 +196,40 @@ pub fn get_user_by_username(
     Ok(load_user_row(db, tenant_id, username)?.map(|(user, _)| user))
 }
 
+/// Load a user by id (`None` when the id does not exist). The
+/// `draft_apply_discount` command needs the cashier by id (the sale
+/// path has its own private copy in `sale.rs`; this one is the
+/// shared lookup — no pin hash is returned, so it is safe to hand
+/// the row to a command layer).
+///
+/// # Errors
+///
+/// Returns [`CoreError::Db`] if the read fails.
+pub fn get_user_by_id(db: &Db, tenant_id: &str, user_id: &str) -> Result<Option<User>, CoreError> {
+    let tenant_id = tenant_id.to_string();
+    let user_id = user_id.to_string();
+    let row = db.read(move |conn| {
+        let row = conn
+            .query_row(
+                "SELECT id, tenant_id, username, role_id, failed_attempts, locked_until FROM user WHERE tenant_id = ?1 AND id = ?2 AND deleted_at IS NULL",
+                rusqlite::params![tenant_id, user_id],
+                |row| {
+                    Ok(User {
+                        id: row.get(0)?,
+                        tenant_id: row.get(1)?,
+                        username: row.get(2)?,
+                        role_id: row.get(3)?,
+                        failed_attempts: row.get(4)?,
+                        locked_until_ms: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    })?;
+    Ok(row)
+}
+
 /// Load a role by id (`None` when the role does not exist).
 ///
 /// # Errors

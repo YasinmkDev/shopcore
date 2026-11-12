@@ -14,5 +14,11 @@ thiserror = { workspace = true }
 # in print_job.payload_json. Workspace dependency, not a new one.
 serde = { workspace = true }
 
+[dev-dependencies]
+# Test-only: the 001c-2 backward-compat test deserializes an old
+# print-job payload (no `discount_minor`). Already a pinned workspace
+# dependency — this adds nothing to Cargo.lock.
+serde_json = { workspace = true }
+
 [lints]
 workspace = true

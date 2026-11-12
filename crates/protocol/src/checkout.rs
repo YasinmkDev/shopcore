@@ -176,6 +176,113 @@ pub struct SaleCompletedPayload {
     pub total_minor: i64,
 }
 
+/// One sold line on the receipt preview (spec 001c-2): the
+/// `PrintDoc` line, rendered from the queued document only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ReceiptLineDto {
+    /// Item/SKU display name.
+    pub name: String,
+    /// Quantity, milli-units.
+    #[ts(type = "number")]
+    pub qty_milli: i64,
+    /// Unit price at scale 10^4.
+    #[ts(type = "number")]
+    pub unit_price_e4: i64,
+    /// Line total (`net + tax`), minor units.
+    #[ts(type = "number")]
+    pub line_total_minor: i64,
+}
+
+/// One payment on the receipt preview (spec 001c-2): the `PrintDoc`
+/// payment, rendered from the queued document only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ReceiptPaymentDto {
+    /// Payment method (`"Cash"` in 001c-2 — cash only).
+    pub method: String,
+    /// Amount tendered, minor units.
+    #[ts(type = "number")]
+    pub amount_minor: i64,
+}
+
+/// The receipt as the UI renders it (spec 001c-2 `ReceiptPreview`):
+/// the queued `PrintDoc`, plus the change and the rounding line the
+/// sale computed. The display rule (02) applies: the pre-tax
+/// subtotal is `net_subtotal_minor + discount_minor`, so
+/// `displayed subtotal − discounts + tax == total` in every tax
+/// mode; the gross `subtotal_minor` is never displayed as the
+/// subtotal line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ReceiptDto {
+    /// The receipt number (`{branch}-{terminal}-{yyyymmdd}-{seq}`).
+    pub receipt_no: String,
+    /// Header lines (shop name, branch, receipt number).
+    pub header: Vec<String>,
+    /// The sold lines.
+    pub lines: Vec<ReceiptLineDto>,
+    /// Sum of line grosses (shelf prices). Display-only context:
+    /// for inclusive lines the gross already contains the tax, so
+    /// this figure is NOT the displayed subtotal — see
+    /// `net_subtotal_minor`.
+    #[ts(type = "number")]
+    pub subtotal_minor: i64,
+    /// Sum of line nets after line discounts and bill-discount
+    /// allocation (the domain's bill net).
+    #[ts(type = "number")]
+    pub net_subtotal_minor: i64,
+    /// Sum of line + bill discounts, minor units.
+    #[ts(type = "number")]
+    pub discount_minor: i64,
+    /// Total tax, minor units.
+    #[ts(type = "number")]
+    pub tax_minor: i64,
+    /// Grand total, minor units.
+    #[ts(type = "number")]
+    pub total_minor: i64,
+    /// Cash tendered, minor units.
+    #[ts(type = "number")]
+    pub tender_minor: i64,
+    /// Change due (`tender − total`), minor units.
+    #[ts(type = "number")]
+    pub change_minor: i64,
+    /// The separate untaxed rounding line (`rounded − total`, 0 when
+    /// rounding is off).
+    #[ts(type = "number")]
+    pub rounding_line_minor: i64,
+    /// How the sale was paid.
+    pub payments: Vec<ReceiptPaymentDto>,
+    /// Footer lines (thank-you, cash-rounding note when on).
+    pub footer: Vec<String>,
+}
+
+/// A completed cash sale (spec 001c-2): what `complete_sale_cash`
+/// returns, as the payment panel's completion view renders it. The
+/// receipt is the queued `PrintDoc`; `receipt_queued` is `false`
+/// once the print attempt after the commit succeeded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SaleCompletedDto {
+    /// The sale id.
+    pub sale_id: String,
+    /// The receipt number.
+    pub receipt_no: String,
+    /// The total actually charged (after cash rounding, if on).
+    #[ts(type = "number")]
+    pub total_minor: i64,
+    /// The change due (`tender − total`).
+    #[ts(type = "number")]
+    pub change_minor: i64,
+    /// The separate untaxed rounding line (`rounded − total`, 0 when
+    /// rounding is off).
+    #[ts(type = "number")]
+    pub rounding_line_minor: i64,
+    /// `true` until a print attempt succeeds (the receipt is queued).
+    pub receipt_queued: bool,
+    /// `true` when this call returned an already-completed sale
+    /// (idempotent replay) instead of committing a new one.
+    pub already_completed: bool,
+    /// The receipt document for the preview.
+    pub receipt: ReceiptDto,
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -220,6 +327,34 @@ mod tests {
         assert!(
             view.contains("currency_exponent: number"),
             "currency_exponent must export as number: {view}"
+        );
+        let completed = SaleCompletedDto::export_to_string(&ts_rs::Config::default())
+            .expect("export SaleCompletedDto");
+        assert!(
+            completed.contains("total_minor: number"),
+            "SaleCompletedDto.total_minor must export as number: {completed}"
+        );
+        assert!(
+            completed.contains("change_minor: number"),
+            "SaleCompletedDto.change_minor must export as number: {completed}"
+        );
+        assert!(
+            completed.contains("receipt: ReceiptDto"),
+            "SaleCompletedDto must carry the receipt preview: {completed}"
+        );
+        assert!(
+            !completed.contains("bigint"),
+            "no i64 field may export as bigint: {completed}"
+        );
+        let receipt =
+            ReceiptDto::export_to_string(&ts_rs::Config::default()).expect("export ReceiptDto");
+        assert!(
+            receipt.contains("net_subtotal_minor: number"),
+            "ReceiptDto.net_subtotal_minor must export as number: {receipt}"
+        );
+        assert!(
+            receipt.contains("discount_minor: number"),
+            "ReceiptDto.discount_minor must export as number: {receipt}"
         );
     }
 }

@@ -50,6 +50,19 @@ pub fn to_iso8601(epoch_ms: i64) -> String {
     )
 }
 
+/// Convert epoch milliseconds to the sale date `yyyymmdd` (UTC),
+/// e.g. `20261112`. The receipt number and the daily aggregates use
+/// this date (001b-2 `CompleteSaleCashInput.date_yyyymmdd`). Same
+/// civil-date math as [`to_iso8601`]; the date is the UTC calendar
+/// day, never the till's local day.
+#[must_use]
+pub fn yyyymmdd_utc(epoch_ms: i64) -> String {
+    let secs = epoch_ms.div_euclid(1_000);
+    let days = secs.div_euclid(SECONDS_PER_DAY);
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}{month:02}{day:02}")
+}
+
 /// Format a year canonically: 4 digits, zero-padded, for 0–9999;
 /// more digits as needed above 9999; a leading `-` plus the same
 /// zero-padding for negative years.
@@ -270,6 +283,31 @@ mod tests {
         for (ms, expected) in cases {
             assert_eq!(to_iso8601(*ms), *expected, "ms={ms}");
             assert_eq!(from_iso8601(expected), Some(*ms), "text={expected}");
+        }
+    }
+
+    #[test]
+    fn yyyymmdd_utc_matches_the_iso_date() {
+        // Known vectors (same instants as `known_vectors` above) plus
+        // the UTC day boundary: 23:59:59.999 is still the same day.
+        let cases: &[(i64, &str)] = &[
+            (0, "19700101"),
+            (-1, "19691231"),
+            (-86_400_000, "19691231"),
+            (951_782_400_000, "20000229"),
+            (1_709_164_800_000, "20240229"),
+            (1_767_225_600_000, "20260101"),
+            (1_790_000_000_123, "20260921"),
+            (86_399_999, "19700101"),
+            (86_400_000, "19700102"),
+        ];
+        for (ms, expected) in cases {
+            assert_eq!(yyyymmdd_utc(*ms), *expected, "ms={ms}");
+            // Cross-check against the ISO form: the date part, dashes
+            // removed, must agree.
+            let iso = to_iso8601(*ms);
+            let iso_date: String = iso.chars().take(10).filter(|c| *c != '-').collect();
+            assert_eq!(iso_date, *expected, "ms={ms}");
         }
     }
 

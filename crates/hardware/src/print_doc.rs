@@ -31,6 +31,14 @@ pub struct PrintDoc {
     /// net). `net_subtotal + tax == total` in every tax mode
     /// (exclusive, inclusive, mixed).
     pub net_subtotal_minor: i64,
+    /// Sum of line + bill discounts, minor units. Added in 001c-2
+    /// so the receipt can show the 02 display rule (`displayed
+    /// subtotal − discounts + tax == total`, with the displayed
+    /// subtotal = `net_subtotal + discount`). `#[serde(default)]`
+    /// keeps print jobs queued by older builds readable (they stored
+    /// no discount — the field reads as 0).
+    #[serde(default)]
+    pub discount_minor: i64,
     /// Total tax, minor units.
     pub tax_minor: i64,
     /// Grand total, minor units.
@@ -67,7 +75,7 @@ pub struct PrintPayment {
 }
 
 #[cfg(test)]
-#[allow(clippy::indexing_slicing)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -83,6 +91,7 @@ mod tests {
             }],
             subtotal_minor: 250,
             net_subtotal_minor: 250,
+            discount_minor: 0,
             tax_minor: 0,
             total_minor: 250,
             payments: vec![PrintPayment {
@@ -97,5 +106,16 @@ mod tests {
         assert_eq!(doc.lines[0].name, "Milk 1L");
         assert_eq!(doc.total_minor, 250);
         assert!(!format!("{doc:?}").contains('\x1b'));
+    }
+
+    #[test]
+    fn print_doc_without_discount_reads_as_zero() {
+        // Backward compatibility (001c-2): print jobs queued by older
+        // builds stored no `discount_minor` — the field defaults to 0
+        // on deserialize, so the queued receipt still renders.
+        let json = r#"{"header":["Shop"],"lines":[],"subtotal_minor":250,"net_subtotal_minor":250,"tax_minor":0,"total_minor":250,"payments":[],"footer":[],"code_payload":null}"#;
+        let doc: PrintDoc = serde_json::from_str(json).expect("old payload parses");
+        assert_eq!(doc.discount_minor, 0);
+        assert_eq!(doc.total_minor, 250);
     }
 }

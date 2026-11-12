@@ -149,6 +149,7 @@ mod tests {
             lines: vec![],
             subtotal_minor: 0,
             net_subtotal_minor: 0,
+            discount_minor: 0,
             tax_minor: 0,
             total_minor: 0,
             payments: vec![],
