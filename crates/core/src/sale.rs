@@ -115,6 +115,10 @@ impl SaleError {
                 shopcore_domain::DomainError::InsufficientTender => "INSUFFICIENT_TENDER",
                 _ => "DOMAIN_ERROR",
             },
+            // A missing tax group keeps its own code through the
+            // `Core` wrapper (the sale path prices through
+            // `tax_spec_for_group`, which returns `CoreError`).
+            Self::Core(CoreError::TaxGroupNotFound(_)) => "TAX_GROUP_NOT_FOUND",
             Self::Core(_) => "CORE_ERROR",
             Self::Hardware(_) => "HARDWARE_ERROR",
             Self::NotFound(_) => "NOT_FOUND",

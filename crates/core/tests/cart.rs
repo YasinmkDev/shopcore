@@ -221,6 +221,35 @@ fn missing_sku_is_an_error() {
 }
 
 #[test]
+fn missing_tax_group_is_an_error_not_a_silent_exempt() {
+    // The exclusive group's row is soft-deleted after the catalog is
+    // built. Before this fix the missing row silently read as
+    // exclusive with no rates — i.e. EXEMPT, a sale priced with no
+    // tax at all. Now it must fail loudly with TAX_GROUP_NOT_FOUND.
+    // (The query cannot tell "never existed" from "soft-deleted" —
+    // both are no row — so one test covers both.)
+    let fx = CartFixture::new("cart-missing-tax-group");
+    fx.db
+        .write(|conn| {
+            conn.execute(
+                "UPDATE tax_group SET deleted_at = ?1 WHERE tenant_id = ?2 AND code = 'STD'",
+                rusqlite::params![NOW, TENANT],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    fx.add(&fx.exc_sku, 1_000, 1_000_000);
+    let draft = shopcore_core::draft::load_draft(&fx.scratch, &fx.draft_id)
+        .unwrap()
+        .unwrap();
+    let err = price_draft_cart(&fx.db, &draft).unwrap_err();
+    assert!(
+        matches!(err, shopcore_core::CoreError::TaxGroupNotFound(_)),
+        "a missing tax group must error TAX_GROUP_NOT_FOUND, got: {err}"
+    );
+}
+
+#[test]
 fn open_shift_id_reads_the_open_shift() {
     let fx = CartFixture::new("cart-shift");
     // No shift row yet: none open.

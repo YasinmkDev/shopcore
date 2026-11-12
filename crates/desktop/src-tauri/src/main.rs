@@ -101,6 +101,7 @@ fn core_error_code(err: &CoreError) -> &'static str {
         CoreError::Pin(_) => "PIN_ERROR",
         CoreError::Search(search) => search.code(),
         CoreError::NotFound(_) => "NOT_FOUND",
+        CoreError::TaxGroupNotFound(_) => "TAX_GROUP_NOT_FOUND",
         CoreError::InvalidInput(_) => "INVALID_INPUT",
         CoreError::ShutdownTimeout => "SHUTDOWN_TIMEOUT",
         CoreError::AuditChain { .. } => "AUDIT_CHAIN_BROKEN",

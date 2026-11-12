@@ -53,10 +53,12 @@ pub struct PricedCart {
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::NotFound`] when a draft line's `SKU` does not
-/// exist, [`CoreError::InvalidInput`] when a line has no tax group or
-/// a stored discount exceeds its line, [`CoreError::Domain`] on a
-/// pricing overflow, and [`CoreError::Db`] if a read fails.
+/// Returns [`CoreError::TaxGroupNotFound`] when a line's tax group
+/// row is missing or deleted, [`CoreError::InvalidInput`] when a line
+/// has no tax group or a stored discount exceeds its line,
+/// [`CoreError::Domain`] on a pricing overflow, and [`CoreError::Db`]
+/// if a read fails (including a draft line whose `SKU` does not
+/// exist).
 pub fn price_draft_cart(db: &Db, draft: &DraftCart) -> Result<PricedCart, CoreError> {
     let exponent = get_setting_i64(
         db,
@@ -71,31 +73,47 @@ pub fn price_draft_cart(db: &Db, draft: &DraftCart) -> Result<PricedCart, CoreEr
     // One read: the `SKU` name + tax data per line. The `DB` actor's
     // read closure returns `DbError`, so core errors from the load
     // step are mapped to `DbError::InvalidInput` with the message
-    // preserved; the tax-spec build runs outside the closure.
+    // preserved — EXCEPT a missing tax group, which maps to
+    // `DbError::NotFound` so the code survives the round-trip (the
+    // `SKU` query below only ever produces `InvalidInput`, so inside
+    // this closure `NotFound` can only be the tax group; the mapping
+    // back happens right after the `db.read`). The tax-spec build
+    // runs outside the closure.
     let tenant_id = draft.tenant_id.clone();
     let draft_lines: Vec<DraftLine> = draft.lines.clone();
-    let loaded: Vec<(DraftLine, String, TaxData)> = db.read(move |conn| {
-        let mut out: Vec<(DraftLine, String, TaxData)> = Vec::with_capacity(draft_lines.len());
-        for line in &draft_lines {
-            let (name, tax_group_id): (String, Option<String>) = conn
-                .query_row(
-                    "SELECT name, tax_group_id FROM sku WHERE id = ?1 AND tenant_id = ?2 AND deleted_at IS NULL",
-                    rusqlite::params![line.sku_id, tenant_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?
-                .ok_or_else(|| {
-                    shopcore_db::DbError::InvalidInput(format!(
-                        "sku {} does not exist",
-                        line.sku_id
-                    ))
-                })?;
-            let tax_data = load_tax_data(conn, &tenant_id, tax_group_id.as_deref())
-                .map_err(|err| shopcore_db::DbError::InvalidInput(err.to_string()))?;
-            out.push((line.clone(), name, tax_data));
-        }
-        Ok(out)
-    })?;
+    let loaded: Vec<(DraftLine, String, TaxData)> = db
+        .read(move |conn| {
+            let mut out: Vec<(DraftLine, String, TaxData)> =
+                Vec::with_capacity(draft_lines.len());
+            for line in &draft_lines {
+                let (name, tax_group_id): (String, Option<String>) = conn
+                    .query_row(
+                        "SELECT name, tax_group_id FROM sku WHERE id = ?1 AND tenant_id = ?2 AND deleted_at IS NULL",
+                        rusqlite::params![line.sku_id, tenant_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?
+                    .ok_or_else(|| {
+                        shopcore_db::DbError::InvalidInput(format!(
+                            "sku {} does not exist",
+                            line.sku_id
+                        ))
+                    })?;
+                let tax_data = load_tax_data(conn, &tenant_id, tax_group_id.as_deref())
+                    .map_err(|err| match err {
+                        CoreError::TaxGroupNotFound(id) => {
+                            shopcore_db::DbError::NotFound(id)
+                        }
+                        other => shopcore_db::DbError::InvalidInput(other.to_string()),
+                    })?;
+                out.push((line.clone(), name, tax_data));
+            }
+            Ok(out)
+        })
+        .map_err(|err| match err {
+            shopcore_db::DbError::NotFound(id) => CoreError::TaxGroupNotFound(id),
+            other => CoreError::Db(other),
+        })?;
 
     let mut inputs: Vec<LineInput> = Vec::with_capacity(loaded.len());
     let mut priced_lines: Vec<PricedCartLine> = Vec::with_capacity(loaded.len());

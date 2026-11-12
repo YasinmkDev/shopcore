@@ -31,7 +31,9 @@ pub struct TaxData {
 /// # Errors
 ///
 /// Returns [`CoreError::InvalidInput`] when the `SKU` has no tax group,
-/// and [`CoreError::Db`] if the read fails.
+/// [`CoreError::TaxGroupNotFound`] when the group's row is missing or
+/// soft-deleted (never a silent exclusive/zero-tax fallback), and
+/// [`CoreError::Db`] if the read fails.
 pub fn load_tax_data(
     conn: &Connection,
     tenant_id: &str,
@@ -42,8 +44,10 @@ pub fn load_tax_data(
             "SKU has no tax group; tax cannot be computed".to_string(),
         ));
     };
-    // The mode comes from the data (owner decision 2026-11-11): a
-    // missing group row reads as exclusive (the column defaults to 0).
+    // The mode comes from the data (owner decision 2026-11-11). A
+    // missing or deleted group row is an error, never a fallback: the
+    // query cannot tell "never existed" from "soft-deleted", and both
+    // mean the catalog is incomplete — pricing must fail loudly.
     let price_includes_tax: i64 = conn
         .query_row(
             "SELECT price_includes_tax FROM tax_group WHERE tenant_id = ?1 AND id = ?2 AND deleted_at IS NULL",
@@ -51,7 +55,7 @@ pub fn load_tax_data(
             |row| row.get(0),
         )
         .optional()?
-        .unwrap_or(0);
+        .ok_or_else(|| CoreError::TaxGroupNotFound(group_id.to_string()))?;
     let mut stmt = conn.prepare(
         "SELECT id, rate_bp FROM tax_rate WHERE tenant_id = ?1 AND tax_group_id = ?2 AND deleted_at IS NULL ORDER BY created_at, id",
     )?;
@@ -116,13 +120,15 @@ pub fn tax_spec_from_data(data: TaxData) -> Result<(TaxSpec, Vec<(String, i64)>)
 /// `(tax_rate_id, rate_bp)` pairs (in group order) for the
 /// `sale_line_tax` rows.
 ///
-/// Rules: a `SKU` with NO tax group is an error (the catalog is
-/// incomplete — tax cannot be computed without a group, and a
-/// `sale_line_tax` row needs a `tax_rate_id`). A group with NO rate
-/// rows, or with ALL rates zero, is exempt (no `sale_line_tax` rows).
-/// Otherwise the rates apply per the group's `price_includes_tax`
-/// flag (0 = exclusive, 1 = inclusive) — the mode comes from the
-/// data, so a sale's lines may mix modes.
+/// Rules: a `SKU` with NO tax group is an error, and a tax group
+/// whose row is missing or deleted is an error
+/// ([`CoreError::TaxGroupNotFound`]) — the catalog is incomplete and
+/// tax cannot be computed without a group, and a `sale_line_tax` row
+/// needs a `tax_rate_id`. A group that EXISTS with NO rate rows, or
+/// with ALL rates zero, is exempt (no `sale_line_tax` rows) — that is
+/// configured data, not a fallback. Otherwise the rates apply per the
+/// group's `price_includes_tax` flag (0 = exclusive, 1 = inclusive) —
+/// the mode comes from the data, so a sale's lines may mix modes.
 ///
 /// Takes a [`Connection`] (not a transaction): the sale path passes
 /// its transaction (which derefs to a connection) and the cart path
@@ -131,7 +137,9 @@ pub fn tax_spec_from_data(data: TaxData) -> Result<(TaxSpec, Vec<(String, i64)>)
 /// # Errors
 ///
 /// Returns [`CoreError::InvalidInput`] when the `SKU` has no tax group
-/// or a rate is out of range, and [`CoreError::Db`] if the read fails.
+/// or a rate is out of range, [`CoreError::TaxGroupNotFound`] when the
+/// group's row is missing or deleted, and [`CoreError::Db`] if the read
+/// fails.
 pub fn tax_spec_for_group(
     conn: &Connection,
     tenant_id: &str,

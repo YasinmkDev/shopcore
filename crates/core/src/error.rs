@@ -26,6 +26,13 @@ pub enum CoreError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    /// A line's tax group row is missing or soft-deleted. Never a
+    /// silent exclusive/zero-tax fallback: a sale cannot be priced
+    /// without its tax group (the mode and the rates come from the
+    /// data). Maps to the stable code `TAX_GROUP_NOT_FOUND`.
+    #[error("tax group not found: {0}")]
+    TaxGroupNotFound(String),
+
     /// The caller passed an invalid argument.
     #[error("invalid input: {0}")]
     InvalidInput(String),

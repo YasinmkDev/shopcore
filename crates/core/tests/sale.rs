@@ -1264,6 +1264,32 @@ fn mixed_mode_sale_uses_each_lines_own_flag() {
     assert_eq!(fx.tax_rows(), vec![(1_800, 1_800), (1_800, 1_800)]);
 }
 
+#[test]
+fn missing_tax_group_errors_tax_group_not_found() {
+    // The STD group's row is soft-deleted after the catalog is built.
+    // Completing a sale on an exclusive SKU must fail with the stable
+    // code TAX_GROUP_NOT_FOUND — never a silent zero-tax sale — and
+    // no sale row may commit.
+    let fx = Fixture::new("tax-group-missing");
+    fx.db
+        .write(|conn| {
+            conn.execute(
+                "UPDATE tax_group SET deleted_at = ?1 WHERE tenant_id = ?2 AND id = ?3",
+                rusqlite::params![NOW, TENANT, TAX_STD_ID],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let draft_id = fx.draft_with(&[("TST100", 1_000)]);
+    let err = fx.complete(&draft_id, 11_800).unwrap_err();
+    assert_eq!(err.code(), "TAX_GROUP_NOT_FOUND", "unexpected error: {err}");
+    assert_eq!(
+        fx.count("SELECT COUNT(*) FROM sale"),
+        0,
+        "no sale may commit without its tax group"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Net cash (owner fix 2026-11-11)
 // ---------------------------------------------------------------------------
