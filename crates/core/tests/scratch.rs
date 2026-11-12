@@ -71,14 +71,24 @@ fn checkpoint_timer_fires_after_a_draft_change() {
 fn checkpoint_timer_bound_under_load() {
     let dir = unique_test_dir(&test_root_scratch(), "timer-bound");
     let _guard = DirGuard(dir.clone());
-    // The production default interval (1 s).
-    let scratch = ScratchDb::open(dir.join("scratch.db")).unwrap();
+    // Short idle interval AND short max wait (production defaults are
+    // 1 s / 5 s): the max-wait cap, not the idle timer, is what fires
+    // under continuous change.
+    let scratch = ScratchDb::open_with_checkpoint_intervals(
+        dir.join("scratch.db"),
+        Duration::from_millis(50),
+        Duration::from_millis(150),
+    )
+    .unwrap();
     let cart = open_draft(&scratch, "tenant", "branch", "terminal", None, None, 0).unwrap();
     assert_eq!(scratch.checkpoints_completed(), 0);
-    // Load: 4 threads hammering draft writes for ~300 ms (scan-path
-    // load). Each write re-arms the timer, so no checkpoint may fire
-    // during the load — only after the last change.
+    // Load: 4 threads hammering draft writes for ~600 ms (scan-path
+    // load). Each write re-arms the idle timer, so WITHOUT the
+    // max-wait cap no checkpoint would fire during the load. WITH
+    // the cap, a checkpoint fires at least every `max_wait` (150 ms)
+    // since the DB first became dirty.
     let stop = AtomicBool::new(false);
+    let loaded_at = Instant::now();
     std::thread::scope(|scope| {
         for _ in 0..4 {
             scope.spawn(|| {
@@ -93,20 +103,33 @@ fn checkpoint_timer_bound_under_load() {
                 }
             });
         }
-        std::thread::sleep(Duration::from_millis(300));
+        // The FIRST checkpoint under continuous change must fire
+        // within the max wait (plus scheduling slack on this VM).
+        wait_for_checkpoints(&scratch, 1, Duration::from_secs(5));
+        let first_fire = loaded_at.elapsed();
+        eprintln!("first checkpoint under continuous change: {first_fire:?} (max wait 150 ms)");
+        assert!(
+            first_fire < Duration::from_secs(1),
+            "the max-wait cap did not fire under load: first checkpoint after {first_fire:?}"
+        );
+        std::thread::sleep(Duration::from_millis(450));
         stop.store(true, Ordering::SeqCst);
     });
-    assert_eq!(
-        scratch.checkpoints_completed(),
-        0,
-        "no checkpoint fires while the draft keeps changing"
+    // ~600 ms of load with a 150 ms cap: at least 2 checkpoints must
+    // have fired DURING the load (the old assertion — zero — is the
+    // unbounded-window behaviour this cap removes).
+    let during_load = scratch.checkpoints_completed();
+    eprintln!("checkpoints during ~600 ms of continuous change: {during_load} (max wait 150 ms)");
+    assert!(
+        during_load >= 2,
+        "expected >= 2 checkpoints during the load, got {during_load}"
     );
     // The final change: measure from here to the checkpoint completing.
     let changed_at = Instant::now();
     draft_add_line(&scratch, &cart.id, "sku-1", 1_000, 100_000, 0).unwrap();
-    wait_for_checkpoints(&scratch, 1, Duration::from_secs(5));
+    wait_for_checkpoints(&scratch, during_load + 1, Duration::from_secs(5));
     let bound = changed_at.elapsed();
-    eprintln!("measured checkpoint bound under load: {bound:?} (interval 1 s)");
+    eprintln!("measured checkpoint bound under load: {bound:?} (interval 50 ms)");
     assert!(
         bound < Duration::from_secs(3),
         "the checkpoint bound under load is {bound:?}, expected < 3 s"

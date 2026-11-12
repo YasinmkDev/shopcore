@@ -199,7 +199,22 @@ hammering the scratch DB): **1.03 s** from the last draft change to
 the checkpoint completing (`crates/core/tests/scratch.rs`,
 `checkpoint_timer_bound_under_load`). So in a power cut, at most
 ~1 s of draft changes can be lost — the cashier re-scans the last
-line or two. A committed sale is NEVER affected: it lives in the
+line or two.
+
+MAX-WAIT CAP (2026-11-12 follow-up): the 1 s idle deadline above
+keeps moving while the draft keeps changing, so under continuous
+scanning the timer could NEVER fire and the loss window was
+unbounded. The timer now ALSO fires at least every ~5 s
+(`DEFAULT_CHECKPOINT_MAX_WAIT`) since the DB first became dirty
+(`dirty_since`, set on the first change after a checkpoint) — the
+earlier of the idle deadline and the max-wait deadline wins.
+MEASURED (2026-11-12, dev VM, 4 writer threads hammering, test
+values interval 50 ms / max wait 150 ms): first checkpoint under
+continuous change after **217 ms**, **4 checkpoints in ~600 ms** of
+load (one per ~150 ms, as designed), final-change bound 114 ms.
+Scaled to the production values (1 s / 5 s), the loss window under
+continuous change is ~5 s plus checkpoint overhead (~70 ms here).
+The idle-case bound (~1 s) is unchanged. A committed sale is NEVER affected: it lives in the
 main DB (`synchronous=FULL`) and is idempotent per `draft_id`
 (UNIQUE), so a second `complete_sale_cash` with the same `draft_id`
 returns the existing sale. A completed draft is TOMBSTONED in the
